@@ -1,0 +1,31 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8
+    hooks:
+      - id: clang-format
+        files: \.(hpp|cpp|h|cc|cu|cuh)$
+
+  - repo: local
+    hooks:
+      - id: build-and-test
+        name: Build and run sketch/ test suite
+        # Fast (~a few seconds); catches compile errors and the two
+        # concurrency bugs' regressions immediately, see docs/BUILD_AND_TEST.md
+        # for why repeated runs matter for the concurrency-sensitive tests.
+        entry: bash -c 'cd sketch && make test'
+        language: system
+        pass_filenames: false
+        files: ^sketch/.*\.(hpp|cpp|cu|cuh)$|^sketch/Makefile$

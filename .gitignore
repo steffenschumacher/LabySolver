@@ -1,0 +1,25 @@
+# Build artifacts (all binaries are compiled from tests/*.cpp — see
+# docs/BUILD_AND_TEST.md; never commit them, always rebuild locally).
+sketch/bin/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+
+# Debugger artifacts
+*.dSYM/
+core
+
+# Editor/OS cruft
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# CUDA build artifacts (once a real .cu kernel is added)
+*.ptx
+*.cubin
+*.fatbin
