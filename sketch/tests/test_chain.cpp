@@ -56,6 +56,22 @@ int main() {
     CHECK(h.count == 8);
     CHECK(h.head == &arena[0]);
 
+    // takeFirst splits without losing order or corrupting either tail.
+    Chain prefix = h.takeFirst(3);
+    CHECK(prefix.count == 3);
+    CHECK(prefix.head == &arena[0]);
+    CHECK(prefix.tail == &arena[2]);
+    CHECK(prefix.tail->next == nullptr);
+    CHECK(h.count == 5);
+    CHECK(h.head == &arena[3]);
+    CHECK(h.tail == &arena[7]);
+
+    Chain remainder = h.takeFirst(99);
+    CHECK(h.empty());
+    CHECK(remainder.count == 5);
+    CHECK(remainder.head == &arena[3]);
+    CHECK(remainder.tail == &arena[7]);
+
     // single()
     Chain s = Chain::single(&arena[0]);
     CHECK(s.count == 1);

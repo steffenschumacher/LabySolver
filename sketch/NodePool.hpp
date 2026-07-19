@@ -10,16 +10,12 @@
 // Preallocates `capacity` nodes exactly once at construction; alloc()/
 // release() never touch the OS allocator again for the lifetime of the run.
 //
-// Sizing: with Master and Worker both doing explicit-stack DFS (see
-// Worker.hpp's class comment), peak concurrent node count is
-// O(numProducers x MAX_DEPTH x branching) -- e.g. 11 producers x 7 depth x
-// 150 branching =~ 11,550 nodes -- NOT O(branching^depth). Size `capacity`
-// to a healthy multiple of that (plus in-flight CUDA batch/staging
-// headroom, e.g. MAX_BATCH), not to the full theoretical leaf count; if
-// this pool ever runs dry in practice, that means branching turned out
-// much higher than assumed, not that a level's worth of leaves is being
-// held at once. Running dry just means acquire() returns fewer nodes than
-// asked for, which callers should treat as backpressure.
+// Sizing: Master uses strict DFS; each asynchronous Worker has an explicit
+// maxResidentNodes budget. Include numWorkers * (maxResidentNodes +
+// refillSize-1), master's DFS allowance, and pipeline/headroom. This is still
+// independent of branching^depth. acquire() may return fewer nodes when the
+// arena is exhausted; ThreadLocalPool::alloc() then returns nullptr so callers
+// can fail diagnostically rather than dereference an empty free list.
 // ---------------------------------------------------------------------------
 class NodePool {
 public:
@@ -87,6 +83,7 @@ public:
 
     JobNode* alloc() {
         if (local.empty()) local = shared.acquire(refillSize);
+        if (local.empty()) return nullptr;
         JobNode* n = local.head;
         local.head = n->next;
         if (!local.head) local.tail = nullptr;

@@ -17,9 +17,14 @@
 // compiler can't elide the batch) and tracks how many jobs have been
 // "processed" per producer, via the ownerId-independent state payload.
 static std::atomic<long> g_batchesRun{0};
+static std::atomic<size_t> g_largestBatch{0};
 void launchCudaBatch(JobState* states, size_t n) {
     for (size_t i = 0; i < n; ++i) states[i].bugsEatenMask = 0; // trivial touch
     g_batchesRun.fetch_add(1, std::memory_order_relaxed);
+    size_t previous = g_largestBatch.load(std::memory_order_relaxed);
+    while (n > previous &&
+           !g_largestBatch.compare_exchange_weak(previous, n, std::memory_order_relaxed)) {
+    }
     std::this_thread::sleep_for(std::chrono::microseconds(50)); // pretend GPU latency
 }
 
@@ -46,7 +51,7 @@ static void runFakeProducer(size_t producerId, size_t totalNodes, Dispatcher& di
             dispatcher.submit(producerId, outgoing.takeAll());
             // Interleave collection with submission — see
             // Dispatcher::tryCollect for why this is required to avoid
-            // deadlocking the single dispatcher thread on a large backlog.
+            // backpressuring the whole bounded dispatcher pipeline.
             Chain chunk;
             while (dispatcher.tryCollect(producerId, chunk)) {
                 gathered.append(chunk);
@@ -61,7 +66,7 @@ static void runFakeProducer(size_t producerId, size_t totalNodes, Dispatcher& di
     // Completion is tracked by total NODE count, not by counting
     // submit()/collect() calls: the dispatcher may merge several of our
     // submitted chunks into a single result chain whenever more than one
-    // becomes ready within the same runOnce() round (near-guaranteed for
+    // becomes ready within the same prepared batch (near-guaranteed for
     // a producer with a large backlog, like the "big" producer here) --
     // so per-call chunk counts never reliably match up 1:1, only totals do.
     while (gathered.count < nodesSubmitted) {
@@ -82,12 +87,7 @@ int main() {
     NodePool pool(BIG_TOTAL + NUM_SMALL_PRODUCERS * SMALL_TOTAL + 1000);
     Dispatcher dispatcher(NUM_SMALL_PRODUCERS + 1);
 
-    std::atomic<bool> stop{false};
-    std::thread dispatcherThread([&] {
-        while (!stop.load(std::memory_order_relaxed)) {
-            if (!dispatcher.runOnce()) std::this_thread::yield();
-        }
-    });
+    dispatcher.start();
 
     std::vector<ProducerResult> results(NUM_SMALL_PRODUCERS + 1);
     std::vector<std::thread> producers;
@@ -99,8 +99,7 @@ int main() {
                            std::ref(pool), std::ref(results[BIG_PRODUCER_ID]));
 
     for (auto& t : producers) t.join();
-    stop.store(true, std::memory_order_relaxed);
-    dispatcherThread.join();
+    dispatcher.stop();
 
     long bigFinish = results[BIG_PRODUCER_ID].finishedAtBatchIndex;
     std::printf("Big producer (%zu nodes) finished at batch #%ld\n", BIG_TOTAL, bigFinish);
@@ -116,6 +115,7 @@ int main() {
     // batches; if fairness holds, small producers finish in a small
     // fraction of that, not near the end.
     CHECK(maxSmallFinish < bigFinish / 2);
+    CHECK(g_largestBatch.load(std::memory_order_relaxed) <= MAX_BATCH);
     CHECK(pool.inUseCount() == 0); // everything returned, no leaks
 
     REPORT();

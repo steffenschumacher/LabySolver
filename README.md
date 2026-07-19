@@ -28,6 +28,15 @@ tested, memory-bounded search/dispatch pipeline around it.
   changes** — it's the most up-to-date "what's actually done" record.
 - **[`docs/BUILD_AND_TEST.md`](docs/BUILD_AND_TEST.md)** — how to build
   and run the test suite.
+- **[`docs/SIMULATION.md`](docs/SIMULATION.md)** — configurable synthetic
+  CUDA/workload simulation for measuring CPU-pipeline feasibility.
+- **[`docs/DISTRIBUTED_ARCHITECTURE.md`](docs/DISTRIBUTED_ARCHITECTURE.md)**
+  — seed-level distribution across remote GPU hosts.
+- **[`docs/INSTRUMENTATION.md`](docs/INSTRUMENTATION.md)** — per-depth and
+  per-seed measurements used to estimate total search-tree size.
+- **[`docs/ASYNC_WORKER_SCHEDULER.md`](docs/ASYNC_WORKER_SCHEDULER.md)** —
+  bounded asynchronous depth-priority scheduling, correctness invariants, and
+  benchmark evidence.
 
 ## Repository layout
 
@@ -40,12 +49,15 @@ sketch/                     All code lives here (single flat module for now).
   Dispatcher.hpp             Round-robin batches jobs across producers, calls the CUDA kernel.
   SeedQueue.hpp               Bounded blocking master -> worker handoff queue.
   Master.hpp                 Explicit-stack DFS from the initial board down to MASTER_DEPTH.
-  Worker.hpp                 Explicit-stack DFS from a seed down to the move budget.
+  Worker.hpp                 Bounded asynchronous depth-priority exhaustive search.
   BeamSearch.hpp              Optional CPU-only heuristic-first pre-pass (see docs/BEAM_SEARCH.md).
   PruningHeuristics.hpp       Two board-agnostic search-space reduction heuristics.
+  RemoteTransport.hpp         TCP framing and coordinator/remote seed bridges.
+  SearchInstrumentation.hpp   Running observed/estimated search-size metrics.
   main_sketch.cpp             Wiring example (not compilable standalone -- board hooks are stubs).
   Makefile                   Builds and runs all tests.
   tests/                     One test file per component; see docs/BUILD_AND_TEST.md.
+  sim/                       Configurable full-pipeline feasibility simulation.
 docs/                        Documentation (this folder).
 ```
 
@@ -66,5 +78,11 @@ named hook functions you must implement against the real game rules:
   point; `Dispatcher.hpp` calls this once per batch (up to 1000 jobs).
 - The real `JobState` layout (`JobState.hpp` is currently a placeholder
   with a `boardBytes[64]` blob and a few result fields).
+
+The eventual level configuration must also select how token-bearing ejected
+tiles behave: either the move is illegal, or the token remains attached to the
+spare tile until it is reinserted. The current sketch's `offBoard` boolean and
+dead-state checks are placeholders and do not yet model the second variant;
+see `docs/OVERVIEW.md` and `docs/STATUS.md`.
 
 See `docs/STATUS.md` for exactly what's tested/verified vs. still open.

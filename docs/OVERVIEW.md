@@ -25,10 +25,18 @@ the opposite end becomes the new spare tile. You choose the spare tile's
 orientations that tile kind actually has — see above).
 
 With 5 columns and 7 rows, the even lines give **10 insertion points**
-(5 columns x 2 ends + ... see the actual level's board for the exact
-count used in this project — treat 10 as the working assumption baked
-into `SeedQueue.hpp`'s `EntryPoint`/`NUM_ENTRIES` and
-`PruningHeuristics.hpp`).
+(coordinates are zero-indexed, with `x` increasing left-to-right and `y`
+increasing top-to-bottom):
+
+```
+(0,1) (0,3) (0,5)     left edge
+(4,1) (4,3) (4,5)     right edge
+(1,0) (3,0)           top edge
+(1,6) (3,6)           bottom edge
+```
+
+Code may encode these as compact IDs `0..9`, but the mapping to coordinates
+must be explicit rather than treating the number as the game rule.
 
 Critically: **the ladybug can also move on its own**, both before and
 after a tile insertion, as long as connected paths allow it. This means a
@@ -38,6 +46,29 @@ single "move" in the turn-budget sense is really:
 2. insert the spare tile at one entry, in one orientation,
 3. (optional) move the ladybug again along the *new* connectivity,
    potentially eating any bug now reachable.
+
+## Tokens on the spare tile (level-configurable rule)
+
+When a shift ejects a tile carrying the ladybug or an uneaten bug, there are
+two level-rule variants that the real board implementation must support:
+
+- **Attached-token mode**: the ejected token stays attached to the new spare
+  tile. It is temporarily off the board and returns when that spare tile is
+  inserted on a later move. An off-board ladybug cannot walk or eat bugs, and
+  an off-board bug cannot be eaten, until its tile is reinserted.
+- **Forbidden-ejection mode**: shifting a tile carrying the ladybug or an
+  uneaten bug off the board is an illegal move, so that candidate is discarded.
+
+This behavior should be selected by the level configuration, not hard-coded in
+the search pipeline. In attached-token mode, `offBoard` is state information,
+not by itself proof that a branch is dead. The complete state must record which
+token(s), if any, are on the spare tile.
+
+On the final allowed insertion, ejecting the ladybug or a still-required bug
+cannot contribute to a solution because there is no later move with which to
+reinsert it. Such a result may be pruned unless all bugs have already been
+eaten. More generally, pruning should be based on the remaining move budget and
+whether required tokens can return, rather than on a single `offBoard` boolean.
 
 ## Why this needs brute force at all
 

@@ -45,6 +45,18 @@ To clean build artifacts:
 make clean
 ```
 
+## Running the feasibility simulation
+
+The test suite uses small deterministic workloads for correctness. To stress
+and measure the complete CPU pipeline with a configurable fake CUDA call, run:
+
+```sh
+make sim
+```
+
+See `docs/SIMULATION.md` for workload controls and guidance on interpreting the
+reported throughput, batch fill, CPU use, and node-pool peak.
+
 ### macOS-specific note
 
 There's a documented workaround in the `Makefile` for a broken standalone
@@ -65,8 +77,14 @@ needed for this specific broken local environment.
 | `test_beam_search` | `BeamSearch.hpp` against a synthetic adversarial "decoy path" board: confirms pure greedy (beam width 1) fails as expected, and diversified beam search (width 16, restarts) finds the planted solution while exploring a tiny fraction of the state space. See `docs/BEAM_SEARCH.md`. |
 | `test_pruning_undo_move` | `isUndoInsertion`/`oppositeEntry`/`sameLine`: exhaustive sweep over every `(entry, tileKind, crossed)` combination. See `docs/PRUNING_HEURISTICS.md`. |
 | `test_pruning_reduce_positions` | `reducePrePositions` against a hand-built graph, including the deliberate "bridge-through-an-on-line-cell" trap case. See `docs/PRUNING_HEURISTICS.md`. |
+| `test_dispatcher_pipeline` | Three-stage preprocessing/CUDA/postprocessing handoff, 2ms partial-batch deadline, immediate full batches, result write-back, hard batch limit, and clean drain. |
 | `test_dispatcher_fairness` | `Dispatcher`'s round-robin batching: a producer with a huge backlog must not starve producers with small backlogs. Also exercises the submit/collect interleaving and total-node-count completion tracking (see `docs/ARCHITECTURE.md`'s "gotchas"). |
-| `test_end_to_end_sim` | The full real `Master` + `Worker` + `Dispatcher` + `SeedQueue` pipeline together, against a small synthetic board with a known planted solution path. Verifies: the solution is found, the reconstructed path matches the planted one, `NodePool` peak usage matches the DFS memory bound (and reports the old BFS-equivalent bound for comparison), and no leaks (pool fully drained at the end). |
+| `test_worker_async` | Exact exhaustive job sets, duplicate/loss detection, deepest-first ordering, hysteresis, completion propagation, and strict memory bounds on regular and tight-memory trees. |
+| `test_worker_cancellation` | Ten repeated mid-flight global cancellations with multiple workers, bounded pipeline drain, producer abandonment, and no false cleanup requirement for untested nodes. |
+| `test_end_to_end_sim` | The full `Master` + asynchronous `Worker` + three-stage `Dispatcher` + `SeedQueue` pipeline against a planted solution. Verifies the reconstructed path, bounded arena use, and expected early-solution retention behavior. |
+| `test_search_instrumentation` | Per-depth counts, branching averages, completed-seed sampling, and total-tree estimation against an exactly known regular tree. |
+| `test_remote_transport` | Versioned seed codec/framing, round-robin delivery to two remote queues, finish propagation, and abort propagation over stream sockets. |
+| `test_remote_end_to_end` | A coordinator master and two independent simulated remote GPU hosts exhaust a synthetic depth-7 tree, verifying weighted seed assignment, metrics return, exact size estimation, job counts, and pool cleanup. |
 
 ## A note on flaky/hang-prone tests
 

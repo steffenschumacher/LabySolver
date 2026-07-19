@@ -6,10 +6,10 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pthread
 # normal Linux/CUDA build box — drop this line there.
 CXXFLAGS += -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/c++/v1
 
-TESTS := test_chain test_nodepool test_inbox test_seedqueue test_beam_search test_pruning_undo_move test_pruning_reduce_positions test_dispatcher_fairness test_end_to_end_sim
+TESTS := test_chain test_nodepool test_inbox test_seedqueue test_beam_search test_pruning_undo_move test_pruning_reduce_positions test_dispatcher_pipeline test_dispatcher_fairness test_worker_async test_worker_cancellation test_end_to_end_sim test_search_instrumentation test_remote_transport test_remote_end_to_end
 BIN_DIR := bin
 
-.PHONY: all test clean
+.PHONY: all test sim clean
 
 all: $(addprefix $(BIN_DIR)/,$(TESTS))
 
@@ -25,6 +25,12 @@ test: all
 		./$(BIN_DIR)/$$t || exit 1; \
 		echo; \
 	done
+
+$(BIN_DIR)/feasibility_sim: sim/feasibility_sim.cpp *.hpp | $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+sim: $(BIN_DIR)/feasibility_sim
+	./$(BIN_DIR)/feasibility_sim
 
 clean:
 	rm -rf $(BIN_DIR)

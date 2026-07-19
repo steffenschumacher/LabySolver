@@ -18,11 +18,11 @@ starved/idling between kernel launches.
 
 The two techniques that make this work, used together:
 
-1. **Depth-first search with an explicit stack**, not breadth-first.
-   Memory for one producer (master or worker) is `O(depth x branching)`
-   — it only ever holds the *untried siblings of the current
-   root-to-leaf path*, not whole levels. This decouples memory from how
-   large the branching factor is (see "Why DFS, not BFS" below).
+1. **Depth-first ordering with explicit bounds**, not breadth-first. The master
+   uses a strict explicit-stack DFS. Workers keep a bounded asynchronous
+   frontier, always choose the deepest ready state, and enforce in-flight plus
+   resident-node limits. Memory is configured per worker and does not grow with
+   the full width of a level.
 
 2. **A preallocated node arena + intrusive linked lists**, so that
    "sending 1000 candidate moves to the GPU" and "getting 1000 results
@@ -43,6 +43,14 @@ a **placeholder** — replace `boardBytes[64]` and the result fields with
 your real encoding, but keep it `is_trivially_copyable` (enforced by a
 `static_assert`): it lives in a preallocated arena and is never
 individually constructed/destructed.
+
+The placeholder `offBoard` flag is not sufficient for the real rules. Some
+levels forbid ejecting any tile carrying the ladybug or an uneaten bug; other
+levels allow the token to remain attached to the spare tile and return on a
+later insertion. The real `JobState` therefore needs level-rule information
+(or access to immutable level configuration) and enough state to identify all
+tokens attached to the spare tile. See `docs/OVERVIEW.md` under "Tokens on the
+spare tile."
 
 ### `Chain.hpp`
 
@@ -83,39 +91,46 @@ and dispatcher -> producer results.
 
 The single point of contact with the GPU. Each producer (master, each
 worker) gets its own dedicated request inbox and result inbox — no two
-producers ever contend on the same lock. One dedicated dispatcher thread
-calls `runOnce()` in a loop:
+producers contend on the same request queue. `Dispatcher::start()` launches a
+three-stage pipeline:
 
-- Round-robins across all producers' inboxes, taking at most one ~200-job
+- **Preprocessing thread:** round-robins across all producers' inboxes, taking at most one ~200-job
   chunk from each per round, until it's assembled a batch of up to
-  `MAX_BATCH` (1000) jobs or run out of ready chunks. This round-robin is
+  `MAX_BATCH` (1000) jobs. A full batch is sent immediately; a partial batch
+  is sent no later than 2ms after its first job was pulled. This round-robin is
   what prevents one producer with a huge backlog from starving everyone
   else — it can only ever contribute one chunk per round, same as a
-  producer with almost nothing queued.
-- Flattens that batch into one contiguous `std::vector<JobState>`
-  (`flattenRunAndWriteBack`) — the one copy that's unavoidable because
+  producer with almost nothing queued. It flattens the batch into one
+  contiguous `std::vector<JobState>` — the one copy that's unavoidable because
   the GPU needs contiguous memory but the jobs actually live scattered
-  across each producer's arena slice.
-- Calls `launchCudaBatch(states, n)` (your real CUDA kernel — not
-  implemented here).
-- Writes the kernel's output fields back into the same `JobNode`s in
+  across each producer's arena slice, then sends an owning batch pointer into
+  a bounded three-slot queue.
+- **CUDA thread:** pulls prepared batches, calls `launchCudaBatch(states, n)`
+  (your real CUDA kernel), and sends the same owning pointer into a second
+  bounded three-slot queue.
+- **Postprocessing thread:** writes kernel output fields back into the same `JobNode`s in
   place, then splits the batch back into per-owner chains
-  (`distributeResults`, again O(batch size) pointer relinking, no
+  (O(batch size) pointer relinking, no
   payload copies) and pushes each owner's chain to its results inbox.
+
+The bounded queues prevent preprocessing or CUDA from building an unbounded
+memory backlog. `stop()` drains stages in order and must be called after all
+producers have joined. Blocking `collect()` uses per-producer condition-variable
+notification; `tryCollect()` stays non-blocking for opportunistic draining.
 
 **Important gotcha, already hit and fixed once**: a producer must
 interleave `submit()` calls with `tryCollect()` (non-blocking) calls
 *while it's still submitting a batch*, not only after submitting
 everything. If a producer's uncollected-results backlog exceeds the
-results inbox's fixed capacity, the dispatcher thread itself blocks
-trying to push more results for that producer — which stalls *every*
-producer, since there's only one dispatcher thread. See the comment on
+results inbox's fixed capacity, postprocessing blocks trying to push more
+results for that producer and eventually backpressures the bounded pipeline.
+See the comment on
 `tryCollect()` in the file itself.
 
 **Second gotcha, already hit and fixed once**: never track "have I
 collected everything I submitted" by counting `submit()`/`collect()`
 *calls*. The dispatcher may merge several of a producer's ready chunks
-into a single result chain within one `runOnce()` round (near-guaranteed
+into a single result chain within one prepared batch (near-guaranteed
 once a producer has a backlog), so per-call counts never reliably match
 up 1:1. Always track by total **node** count instead
 (`results.count < nodesSubmitted`) — see `Master::tryExpand` /
@@ -141,18 +156,18 @@ Runs once, single-threaded, from the initial board. Does an
 alive, instead of expanding further itself, it packages the board +
 reconstructed move list into a `Seed` and pushes it to the `SeedQueue`
 for a worker to pick up (`emitSeed`), then releases that node
-immediately. Structurally near-identical to `Worker.hpp` (see below) —
-this duplication is a known, deliberate-for-now simplification; see
-`docs/STATUS.md`.
+immediately.
 
 ### `Worker.hpp`
 
-One instance per worker thread. Pulls `Seed`s off the `SeedQueue` in a
-loop and, for each, runs its own **explicit-stack depth-first search**
-from that seed down to the overall move budget (`MAX_DEPTH`, currently
-7) — i.e. workers own the remaining moves (5-7, given `MASTER_DEPTH=4`).
+One instance per worker thread. It pulls `Seed`s from `SeedQueue` and runs a
+**bounded asynchronous depth-priority exhaustive search** through the remaining
+moves 5-7. It may submit several parent expansions before blocking, but always
+selects the deepest evaluated-ready state and never exceeds configured
+in-flight/resident limits. See `docs/ASYNC_WORKER_SCHEDULER.md` for the complete
+algorithm, invariants, diagrams, and benchmarks.
 
-#### Why DFS, not BFS (the key design decision of this whole project)
+#### Why bounded depth-priority, not BFS
 
 The very first design (before this repo's current state) was
 breadth-first: expand a whole level at a time, keep all of it in memory,
@@ -163,52 +178,35 @@ BFS frontier is hundreds of MB to tens of GB *per producer* (see
 `docs/OVERVIEW.md`'s branching-factor math, and `NodePool.hpp`'s sizing
 comment for the exact numbers).
 
-An **explicit-stack DFS** instead holds, per depth level, only the
-*currently untried siblings of the one path being explored right now* —
-a `std::vector<Frame>` where `Frame{parent, remaining-children-chain}`.
-When a `Frame`'s `remaining` chain empties, that frame is popped and its
-`parent` node is released — the whole subtree beneath it has, by
-definition, already been fully explored and had its own memory released
-incrementally as *its* frames emptied. Peak memory per producer is
-`O(depth x branching)` — e.g. `7 x 150 x 80B` ≈ 84KB — regardless of how
-large `branching` actually is. This is the whole reason DFS won out over
-BFS once the real branching factor became known.
+Strict DFS bounded memory well but exposed too little independent work to hide
+CUDA latency. The current worker admits multiple expansions only within a hard
+resident budget. Returned survivors enter per-depth queues; deepest states are
+expanded first. Parent child-counts prove when complete negative subtrees can
+be released. Thus concurrency is bounded by configuration rather than by
+`branching^depth`.
 
-**Total work is unchanged.** An exhaustive DFS visits exactly the same
-set of nodes as an exhaustive BFS would, submits the same total number of
-CUDA jobs, and takes (in principle) the same wall-clock time. The
-benefit is purely **peak host memory**, not throughput. There is a minor
-theoretical risk that DFS could under-fill a GPU batch temporarily (if
-too few producers currently have ready siblings), but with a real
-branching factor around 150, even 2-3 concurrently-active producers can
-fill a 1000-job batch — this was judged an acceptable, much smaller
-risk than the BFS memory blowup it replaces (see the conversation
-history / `docs/STATUS.md` for the reasoning).
+**Total exhaustive work is unchanged.** Ordering and concurrency limits do not
+prune. The asynchronous scheduler exists to overlap independent expansions and
+keep the three-stage dispatcher full while retaining a strict memory bound.
 
-Both `Master::tryExpand`/`runStack` and `Worker::tryExpand`/`runStack`
-follow the identical pattern:
+Master retains the strict `tryExpand`/`runStack` pattern. Worker instead runs an
+event loop that alternates opportunistic result classification, deepest-ready
+submission, and cancellable blocking collection. Negative completion propagates
+only when `outstandingChildren` reaches zero on an `expansionComplete` parent.
 
-1. `tryExpand(node)`: submit `candidateMoves(node->state)` as one CUDA
-   batch (via the dispatcher, interleaving submit/collect — see the
-   `Dispatcher.hpp` gotchas above), then classify each result as
-   winning / dead (off-board) / alive-survivor. Winning triggers global
-   solution-found + queue abort (see below) and stops everything. Dead
-   nodes are released immediately. If there's at least one alive
-   survivor, push a new `Frame` for them and return `true`; otherwise
-   release `node` itself (it was a dead end) and return `false`.
-2. `runStack()`: pop the next untried child off the top frame, and
-   either recurse into it via `tryExpand` (worker: if depth allows;
-   master: if depth `< MASTER_DEPTH`) or, for master specifically, once
-   depth reaches `MASTER_DEPTH`, hand it off via `emitSeed` instead of
-   expanding further. Repeat until the stack empties (this producer's
-   whole assigned subtree exhausted with no win) or a solution is found
-   anywhere.
+The current sketch still implements the older placeholder classification
+`offBoard != 0 => dead`. That is correct only for levels using
+forbidden-ejection mode (and only if `offBoard` means that a protected token was
+ejected). In attached-token mode, a token on the spare tile is a live state when
+enough moves remain to reinsert it. This classification must be replaced when
+the real board state and configurable level rules are integrated.
 
 ### `SearchGlobals` (defined in `Worker.hpp`)
 
-Just an `std::atomic<bool> solutionFound` and a `JobNode* solutionLeaf`,
-shared by reference across master + all workers. Once any producer sets
-`solutionFound`, every other producer's next loop check
+An atomic `solutionFound`, retained `solutionLeaf`, and mutex-protected
+`publishSolution()` shared by master + all workers. Exactly one producer
+publishes the pointer before a release-store makes the flag visible. Once set,
+every other producer's next loop check
 (`while (!solutionFound.load() && ...)`) causes it to stop looking for
 more work and exit.
 
@@ -249,7 +247,7 @@ latent) in `Master.hpp`/`Worker.hpp`: `tryExpand` used to track
 "have I collected all my submitted results" by counting
 `submit()`/`collect()` **calls** (`chunksSubmitted`/`chunksCollected`).
 But the dispatcher can merge several of a producer's ready chunks into
-one result chain within a single `runOnce()` round — so per-call counts
+one result chain within a single prepared batch — so per-call counts
 never reliably reach equality once a producer has any backlog, and the
 final blocking drain loop (`while (chunksCollected < chunksSubmitted)`)
 could hang forever. Fixed by tracking total **node** counts instead

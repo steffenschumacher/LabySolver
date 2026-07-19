@@ -1,245 +1,343 @@
 #pragma once
+
 #include "Chain.hpp"
-#include "NodePool.hpp"
 #include "Dispatcher.hpp"
+#include "NodePool.hpp"
+#include "SearchInstrumentation.hpp"
 #include "SeedQueue.hpp"
+
+#include <array>
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <stdexcept>
 #include <vector>
 
-constexpr size_t FLUSH_THRESHOLD = 200; // producer -> dispatcher chunk size
+constexpr size_t FLUSH_THRESHOLD = 200;
 constexpr int MAX_DEPTH = 7;
 
-// Shared across master + all workers.
 struct SearchGlobals {
     std::atomic<bool> solutionFound{false};
-    JobNode* solutionLeaf = nullptr; // valid only after solutionFound == true
+    JobNode* solutionLeaf = nullptr;
+    std::mutex solutionMutex;
+
+    bool publishSolution(JobNode* leaf) {
+        std::lock_guard<std::mutex> lock(solutionMutex);
+        if (solutionFound.load(std::memory_order_relaxed)) return false;
+        solutionLeaf = leaf;
+        solutionFound.store(true, std::memory_order_release);
+        return true;
+    }
 };
 
-// ---------------------------------------------------------------------------
-// Board-specific hooks — fill these in against your real tile/board model.
-// Kept out of the pipeline scaffolding on purpose.
-// ---------------------------------------------------------------------------
 struct Move {
     uint8_t insertPoint;
     uint8_t orientation;
 };
 
-// Up to ~30 legal (insertPoint, orientation) combos for the current loose
-// tile, given `parent`'s board state -- or several times that once the
-// ladybug's own pre-insertion reposition choice is folded in as part of
-// the same move. candidateMoves is exactly where that fold-in happens: it
-// should enumerate (ladybug pre-position x insertPoint x orientation), not
-// just the tile placements alone.
 std::vector<Move> candidateMoves(const JobState& parent);
-
-// Fills `out` with the board resulting from applying `move` to `parent`
-// (before CUDA has evaluated reachability — those fields get overwritten
-// by the kernel once this job is submitted and processed).
 void applyMove(JobState& out, const JobState& parent, Move move);
-
-// True once bugsEatenMask (after CUDA has processed this state) indicates
-// all 4 bugs are gone.
 bool allBugsEaten(const JobState& state);
 
-// ---------------------------------------------------------------------------
-// Worker: explicit-stack depth-first search from each seed, instead of a
-// level-by-level breadth-first search.
+struct WorkerSchedulerConfig {
+    size_t maxJobsInFlight = 1000;
+    size_t resumeJobsInFlight = 750;
+    size_t maxResidentNodes = 5000;
+    // Conservative branching used to reserve enough memory to drive one
+    // deepest branch to terminal depth even when the rest of the budget is
+    // occupied by ready/in-flight nodes.
+    size_t escapeBranching = 150;
+};
+
+struct WorkerSchedulerStats {
+    uint64_t expansionsSubmitted = 0;
+    uint64_t jobsSubmitted = 0;
+    uint64_t resultsReceived = 0;
+    uint64_t completedSeeds = 0;
+    uint64_t throttleTransitions = 0;
+    size_t peakJobsInFlight = 0;
+    size_t peakReadyNodes = 0;
+    size_t peakResidentNodes = 0;
+};
+
+// Bounded asynchronous, depth-priority exhaustive worker.
 //
-// Why: once the ladybug's own pre-insertion reposition choice is folded
-// into the branching factor (~30 tile placements x ~5 average reachable
-// lady positions =~ 150), a breadth-first frontier's memory is
-// O(branching^depth) -- e.g. 150^3 x 100B =~ 340MB *per worker* just for
-// the last 3 moves, and grows by another 150x for every extra level a
-// worker owns. An explicit-stack DFS instead only ever holds, per depth,
-// the untried siblings of *one* ancestor path -- memory is
-// O(depth x branching) =~ 7 x 150 x 100B =~ 105KB per worker, regardless
-// of how large branching gets. Total work done (and hence total CUDA
-// jobs submitted) is unchanged between BFS and DFS when the search must
-// run to exhaustion -- the win here is peak memory, not throughput.
+// Unlike the original strict DFS implementation, this worker may have several
+// parent expansions in flight simultaneously. Evaluated survivors are kept in
+// per-depth FIFO queues; the deepest ready depth is always expanded first.
+// Submission pauses at maxJobsInFlight and resumes below the lower hysteresis
+// threshold. A strict resident-node budget plus an escape reserve prevents the
+// bounded frontier from exhausting memory.
 //
-// Dead subtrees are released back to the pool the instant they're proven
-// dead (per exhausted frame, not in one bulk pass at the end), so memory
-// stays flat for the whole run rather than merely bounded at the peak.
-// ---------------------------------------------------------------------------
+// No scheduling threshold prunes. Completion propagates toward the seed root
+// only when an expanded node's final child subtree completes negatively.
 class Worker {
 public:
     Worker(size_t id, Dispatcher& dispatcher, NodePool& pool, SeedQueue<32>& seeds,
-           SearchGlobals& globals)
+           SearchGlobals& globals, SearchInstrumentationSink* instrumentation = nullptr,
+           WorkerSchedulerConfig config = {})
         : id(id), dispatcher(dispatcher), localPool(pool, FLUSH_THRESHOLD), seeds(seeds),
-          globals(globals) {}
+          globals(globals), instrumentation(instrumentation), config(config) {
+        validateConfig();
+    }
 
     void run() {
         Seed seed;
-        while (!globals.solutionFound.load(std::memory_order_relaxed) && seeds.pop(seed)) {
+        while (!globals.solutionFound.load(std::memory_order_relaxed) && seeds.pop(seed))
             exploreFromSeed(seed);
-        }
     }
+
+    const WorkerSchedulerStats& schedulerStats() const { return stats; }
 
 private:
-    // One entry per depth below the seed root: the untried siblings at
-    // that depth, plus the parent node whose children they are (so it can
-    // be released the instant this frame is fully exhausted, without
-    // waiting for anything else).
-    struct Frame {
-        JobNode* parent;
-        Chain remaining;
-    };
+    void validateConfig() const {
+        if (config.maxJobsInFlight == 0)
+            throw std::invalid_argument("maxJobsInFlight must be positive");
+        if (config.resumeJobsInFlight >= config.maxJobsInFlight)
+            throw std::invalid_argument("resumeJobsInFlight must be below maxJobsInFlight");
+        if (config.escapeBranching == 0)
+            throw std::invalid_argument("escapeBranching must be positive");
+        const size_t minimum = config.escapeBranching * (MAX_DEPTH - MASTER_SEED_DEPTH_HINT);
+        if (config.maxResidentNodes <= minimum)
+            throw std::invalid_argument("maxResidentNodes is too small for the escape reserve");
+    }
+
+    void initializeNode(JobNode* node, JobNode* parent, uint32_t level) {
+        node->parent = parent;
+        node->level = level;
+        node->ownerId = static_cast<uint32_t>(id);
+        node->outstandingChildren = 0;
+        node->expansionComplete = false;
+        ++residentNodes;
+        stats.peakResidentNodes = std::max(stats.peakResidentNodes, residentNodes);
+    }
 
     void exploreFromSeed(const Seed& seed) {
+        clearSchedulerState();
+        activeSeedJobs.fill(0);
+
         JobNode* root = localPool.alloc();
+        if (!root) throw std::runtime_error("NodePool exhausted allocating worker seed root");
         root->state = seed.state;
-        root->parent = nullptr;
-        root->level = seed.depth; // master tells us how deep this seed already is
-        root->ownerId = id;
+        initializeNode(root, nullptr, seed.depth);
+        activeRoot = root;
+        pushReady(root);
 
-        // Either pushes root's children as the first frame, or fully
-        // handles root as a dead end/winning leaf and releases it itself.
-        tryExpand(root);
-        runStack();
-    }
+        while (activeRoot && !globals.solutionFound.load(std::memory_order_relaxed)) {
+            drainAvailableResults();
+            updateThrottle();
 
-    // Drives the DFS stack to completion (this seed's whole subtree
-    // exhausted with no win) or until a solution is found anywhere.
-    void runStack() {
-        while (!stack.empty()) {
-            if (globals.solutionFound.load(std::memory_order_relaxed)) {
-                // Someone found it (possibly us, possibly another worker).
-                // Leave whatever's left on our stack exactly as-is: if the
-                // win is ours, our ancestors must stay alive for
-                // reconstruction; if it's someone else's, the process is
-                // about to exit anyway and there's nothing to gain by
-                // unwinding cleanly here. See exploreFromSeed's win-path
-                // comment in tryExpand for the matching reasoning.
-                return;
+            bool submitted = false;
+            while (!submissionPaused && !globals.solutionFound.load(std::memory_order_relaxed)) {
+                JobNode* node = peekDeepestReady();
+                if (!node) break;
+
+                std::vector<Move> moves = candidateMoves(node->state);
+                if (!canExpand(*node, moves.size())) {
+                    // In-flight pressure is recoverable by collecting. If no
+                    // work can return, the configured resident budget cannot
+                    // satisfy its promised escape reserve.
+                    submissionPaused = jobsInFlight > 0;
+                    if (!submissionPaused)
+                        throw std::runtime_error(
+                            "resident-node budget cannot advance deepest ready branch");
+                    break;
+                }
+
+                popDeepestReady();
+                expandNode(node, moves);
+                submitted = true;
+                drainAvailableResults();
+                updateThrottle();
             }
-            Frame& top = stack.back();
-            if (top.remaining.empty()) {
-                // Every child of top.parent has been fully explored with
-                // no win found beneath it -- release it and unwind.
-                Chain single = Chain::single(top.parent);
-                localPool.releaseChain(single);
-                stack.pop_back();
-                continue;
-            }
-            JobNode* next = top.remaining.head;
-            top.remaining.head = next->next;
-            if (!top.remaining.head) top.remaining.tail = nullptr;
-            --top.remaining.count;
-            next->next = nullptr;
 
-            // Pushes a new frame for `next` if it has live children left
-            // to explore; otherwise fully handles/releases `next` itself.
-            // Either way, the next loop iteration does the right thing:
-            // drill into the new frame, or keep consuming `top.remaining`.
-            tryExpand(next);
+            if (!activeRoot || globals.solutionFound.load(std::memory_order_relaxed)) break;
+            if (jobsInFlight > 0 && (submissionPaused || !submitted || !hasReady())) {
+                Chain results;
+                if (!dispatcher.collectCancellable(id, results, globals.solutionFound)) break;
+                processResults(results);
+                updateThrottle();
+            } else if (!hasReady() && jobsInFlight == 0) {
+                throw std::logic_error("worker seed has no ready or in-flight work but is incomplete");
+            }
+        }
+
+        // Early solution/abort stops the whole search. This producer explicitly
+        // abandons later results so postprocessing can drain without blocking
+        // on an inbox nobody will consume. Nodes are not released or marked
+        // negative; they remain arena-resident until process teardown.
+        if (globals.solutionFound.load(std::memory_order_relaxed)) {
+            dispatcher.abandonProducer(id);
+            return;
+        }
+
+        if (!globals.solutionFound.load(std::memory_order_relaxed)) {
+            if (residentNodes != 0 || readyNodes != 0 || jobsInFlight != 0)
+                throw std::logic_error("worker completed seed with retained scheduler state");
+            ++stats.completedSeeds;
+            if (instrumentation) instrumentation->recordCompletedSeed(activeSeedJobs);
         }
     }
 
-    // Attempts to expand `parent` into its children via one CUDA
-    // round-trip. Returns true and pushes a new frame if `parent` has at
-    // least one live, unexplored child left to drive the DFS deeper into.
-    // Returns false if `parent` turned out to be a dead end (already
-    // released) or the winning leaf was found among its children (parent
-    // deliberately left un-released, since it's now part of the ancestor
-    // chain the caller needs for path reconstruction).
-    bool tryExpand(JobNode* parent) {
-        Chain outgoing, results;
-        size_t nodesSubmitted = 0;
+    bool canExpand(const JobNode& parent, size_t candidates) const {
+        if (jobsInFlight + candidates > config.maxJobsInFlight && jobsInFlight > 0) return false;
+        const size_t childDepth = parent.level + 1;
+        const size_t remainingExpansions =
+            childDepth < MAX_DEPTH ? static_cast<size_t>(MAX_DEPTH - childDepth) : 0;
+        const size_t escapeReserve = remainingExpansions * config.escapeBranching;
+        return residentNodes + candidates + escapeReserve <= config.maxResidentNodes;
+    }
 
-        for (Move move : candidateMoves(parent->state)) {
+    void expandNode(JobNode* parent, const std::vector<Move>& moves) {
+        if (moves.empty()) {
+            parent->expansionComplete = true;
+            completeSubtree(parent);
+            return;
+        }
+
+        parent->expansionComplete = false;
+
+        Chain outgoing;
+        for (Move move : moves) {
             JobNode* child = localPool.alloc();
-            child->parent = parent;
-            child->level = parent->level + 1;
-            child->ownerId = id;
+            if (!child) throw std::runtime_error("NodePool exhausted despite worker resident budget");
+            initializeNode(child, parent, parent->level + 1);
             applyMove(child->state, parent->state, move);
+            ++parent->outstandingChildren;
             outgoing.pushBack(child);
+            ++jobsInFlight;
+            ++stats.jobsSubmitted;
+            if (child->level < activeSeedJobs.size()) ++activeSeedJobs[child->level];
 
             if (outgoing.count == FLUSH_THRESHOLD) {
-                nodesSubmitted += outgoing.count;
                 dispatcher.submit(id, outgoing.takeAll());
-                // Drain opportunistically so our own uncollected-results
-                // backlog never grows unbounded relative to the
-                // dispatcher's fixed results-inbox capacity (see
-                // Dispatcher::tryCollect for why this matters).
-                Chain chunk;
-                while (dispatcher.tryCollect(id, chunk)) {
-                    results.append(chunk);
-                }
+                drainAvailableResults();
             }
         }
-        if (!outgoing.empty()) {
-            nodesSubmitted += outgoing.count;
-            dispatcher.submit(id, outgoing.takeAll());
-        }
-        // Completion is tracked by total NODE count, not by how many
-        // submit()/collect() calls happened: the dispatcher may merge
-        // several of our submitted chunks into a single result chain
-        // whenever more than one of our chunks becomes ready within the
-        // same runOnce() round (very likely once a producer has a large
-        // backlog) — so per-call chunk counts can never be relied on to
-        // match up 1:1, only total node counts can.
-        while (results.count < nodesSubmitted) {
-            Chain chunk;
-            dispatcher.collect(id, chunk); // blocking for the remainder
-            results.append(chunk);
-        }
+        if (!outgoing.empty()) dispatcher.submit(id, outgoing.takeAll());
+        parent->expansionComplete = true;
 
-        Chain dead, survivors;
-        bool wonHere = false;
-        JobNode* n = results.head;
-        while (n) {
-            JobNode* next = n->next;
-            n->next = nullptr;
-            if (allBugsEaten(n->state)) {
-                globals.solutionLeaf = n;
-                globals.solutionFound.store(true, std::memory_order_relaxed);
-                wonHere = true;
-                // Wake anyone (master or a sibling worker) currently
-                // blocked in seeds.push()/pop() -- e.g. master mid-push on
-                // a full queue while this worker's run() loop is about to
-                // exit without ever calling pop() again now that
-                // solutionFound is true. Without this, master could block
-                // forever with nothing left to drain the queue.
-                seeds.abort();
-                // Anything else discovered in this same batch no longer
-                // matters -- it'll land in `dead` below and get released.
-            } else if (isAlive(n->state) && n->level < MAX_DEPTH) {
-                survivors.pushBack(n);
-            } else {
-                dead.pushBack(n); // off-board, or alive but out of moves
-            }
-            n = next;
-        }
-        localPool.releaseChain(dead); // O(1) regardless of dead count
-
-        if (wonHere) {
-            // These were about to become the next frame, but the search
-            // is over -- release them too. `parent` (and everything above
-            // it) must stay intact for reconstruction, so it's the one
-            // thing here we deliberately do NOT release.
-            localPool.releaseChain(survivors);
-            return false;
-        }
-
-        if (survivors.empty()) {
-            // parent is a fully dead end: no legal move keeps this
-            // lineage alive. Release it immediately rather than pushing
-            // an empty frame just to pop it again next iteration.
-            Chain single = Chain::single(parent);
-            localPool.releaseChain(single);
-            return false;
-        }
-
-        stack.push_back(Frame{parent, survivors});
-        return true;
+        ++stats.expansionsSubmitted;
+        stats.peakJobsInFlight = std::max(stats.peakJobsInFlight, jobsInFlight);
+        if (instrumentation)
+            instrumentation->recordExpansion(parent->level, moves.size(), false);
     }
 
-    static bool isAlive(const JobState& s) { return s.offBoard == 0; }
+    void drainAvailableResults() {
+        Chain results;
+        while (dispatcher.tryCollect(id, results)) {
+            processResults(results);
+            results = {};
+        }
+    }
+
+    void processResults(Chain& results) {
+        JobNode* node = results.head;
+        results = {};
+        while (node) {
+            JobNode* next = node->next;
+            node->next = nullptr;
+            if (jobsInFlight == 0) throw std::logic_error("received more jobs than were in flight");
+            --jobsInFlight;
+            ++stats.resultsReceived;
+
+            if (allBugsEaten(node->state)) {
+                globals.publishSolution(node);
+                seeds.abort();
+            } else if (node->state.offBoard == 0 && node->level < MAX_DEPTH) {
+                pushReady(node);
+            } else {
+                node->expansionComplete = true; // evaluated negative/terminal leaf
+                completeSubtree(node);
+            }
+            node = next;
+        }
+    }
+
+    void completeSubtree(JobNode* node) {
+        while (node) {
+            if (!node->expansionComplete && node->level < MAX_DEPTH)
+                throw std::logic_error("attempted to prune an unexpanded live node");
+            if (node->outstandingChildren != 0)
+                throw std::logic_error("attempted to prune a node with unfinished children");
+
+            JobNode* parent = node->parent;
+            bool wasRoot = node == activeRoot;
+            localPool.releaseChain(Chain::single(node));
+            if (residentNodes == 0) throw std::logic_error("resident-node accounting underflow");
+            --residentNodes;
+            if (wasRoot) activeRoot = nullptr;
+            if (!parent) return;
+            if (parent->outstandingChildren == 0)
+                throw std::logic_error("parent child-completion accounting underflow");
+            --parent->outstandingChildren;
+            if (!parent->expansionComplete || parent->outstandingChildren != 0) return;
+            node = parent;
+        }
+    }
+
+    void pushReady(JobNode* node) {
+        readyByDepth[node->level].push_back(node);
+        ++readyNodes;
+        stats.peakReadyNodes = std::max(stats.peakReadyNodes, readyNodes);
+    }
+
+    JobNode* peekDeepestReady() {
+        for (int depth = MAX_DEPTH - 1; depth >= 0; --depth)
+            if (!readyByDepth[depth].empty()) return readyByDepth[depth].front();
+        return nullptr;
+    }
+
+    void popDeepestReady() {
+        for (int depth = MAX_DEPTH - 1; depth >= 0; --depth) {
+            if (readyByDepth[depth].empty()) continue;
+            readyByDepth[depth].pop_front();
+            --readyNodes;
+            return;
+        }
+        throw std::logic_error("popDeepestReady called with no ready node");
+    }
+
+    bool hasReady() const { return readyNodes != 0; }
+
+    void updateThrottle() {
+        bool old = submissionPaused;
+        if (jobsInFlight >= config.maxJobsInFlight)
+            submissionPaused = true;
+        else if (jobsInFlight < config.resumeJobsInFlight)
+            submissionPaused = false;
+        if (old != submissionPaused) ++stats.throttleTransitions;
+    }
+
+    void clearSchedulerState() {
+        for (auto& queue : readyByDepth) queue.clear();
+        readyNodes = 0;
+        jobsInFlight = 0;
+        residentNodes = 0;
+        submissionPaused = false;
+        activeRoot = nullptr;
+    }
+
+    // Seeds currently originate at depth four. Keeping this separate from
+    // MASTER_DEPTH avoids a Worker.hpp -> Master.hpp include cycle.
+    static constexpr int MASTER_SEED_DEPTH_HINT = 4;
 
     size_t id;
     Dispatcher& dispatcher;
     ThreadLocalPool localPool;
     SeedQueue<32>& seeds;
     SearchGlobals& globals;
-    std::vector<Frame> stack;
+    SearchInstrumentationSink* instrumentation;
+    WorkerSchedulerConfig config;
+    WorkerSchedulerStats stats;
+
+    std::array<std::deque<JobNode*>, MAX_DEPTH + 1> readyByDepth;
+    std::array<uint64_t, INSTRUMENTED_DEPTHS> activeSeedJobs{};
+    size_t readyNodes = 0;
+    size_t jobsInFlight = 0;
+    size_t residentNodes = 0;
+    bool submissionPaused = false;
+    JobNode* activeRoot = nullptr;
 };

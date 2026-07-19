@@ -14,6 +14,11 @@ struct JobNode {
     JobNode* next;    // intrusive singly-linked pointer
     uint32_t ownerId; // which producer (0 = master, 1..N = workers)
     uint32_t level;   // depth this node represents (1..7)
+    // Used by the bounded asynchronous Worker. A node remains resident until
+    // its expansion has been submitted and every child subtree has completed
+    // negatively. Master does not depend on these fields.
+    uint32_t outstandingChildren;
+    bool expansionComplete;
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +65,24 @@ struct Chain {
     Chain takeAll() {
         Chain result = *this;
         *this = Chain{};
+        return result;
+    }
+
+    // Detach and return up to `limit` nodes from the front. This is O(limit)
+    // because the list is singly linked. Dispatcher uses it only at a hard
+    // batch boundary, where walking the selected nodes is unavoidable anyway.
+    Chain takeFirst(size_t limit) {
+        if (limit == 0 || empty()) return {};
+        if (limit >= count) return takeAll();
+
+        Chain result;
+        result.head = head;
+        result.tail = head;
+        for (size_t i = 1; i < limit; ++i) result.tail = result.tail->next;
+        head = result.tail->next;
+        result.tail->next = nullptr;
+        result.count = limit;
+        count -= limit;
         return result;
     }
 

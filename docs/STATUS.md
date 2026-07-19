@@ -15,12 +15,17 @@ file first, then dip into `docs/ARCHITECTURE.md` for the "why".
 - **SeedQueue** (`SeedQueue.hpp`): bounded blocking master->worker
   queue, now with a working `abort()` mechanism (see below). Tested
   (`test_seedqueue`, and exercised for real in `test_end_to_end_sim`).
-- **Dispatcher** (`Dispatcher.hpp`): round-robin fair batching across
-  producers. Tested (`test_dispatcher_fairness`, `test_end_to_end_sim`).
-- **Master/Worker DFS** (`Master.hpp`, `Worker.hpp`): explicit-stack
-  depth-first search, `MASTER_DEPTH = 4` (master owns moves 1-4, workers
-  own 5-7). Tested end-to-end (`test_end_to_end_sim`), including
-  solution-path reconstruction via `parent` pointers + seed move lists.
+- **Dispatcher** (`Dispatcher.hpp`): bounded three-stage preprocessing/CUDA/
+  postprocessing pipeline, fair producer batching, immediate full-batch flush,
+  and a 2ms maximum partial-batch assembly interval. Tested
+  (`test_dispatcher_pipeline`, `test_dispatcher_fairness`,
+  `test_end_to_end_sim`).
+- **Master DFS + asynchronous workers** (`Master.hpp`, `Worker.hpp`): master
+  uses explicit-stack DFS through `MASTER_DEPTH = 4`; workers use bounded
+  asynchronous deepest-first scheduling for moves 5-7 with in-flight
+  hysteresis, resident limits, and exact descendant completion accounting.
+  Tested directly (`test_worker_async`) and end-to-end
+  (`test_end_to_end_sim`), including solution reconstruction.
 - **Two concurrency bugs found and fixed** (both were real deadlocks/
   hangs, not test artifacts — see `docs/ARCHITECTURE.md` for full
   writeups):
@@ -46,6 +51,12 @@ file first, then dip into `docs/ARCHITECTURE.md` for the "why".
   both tested (`test_pruning_reduce_positions`, `test_pruning_undo_move`)
   including a deliberate "trap" test case for heuristic 1's soundness.
   See `docs/PRUNING_HEURISTICS.md`.
+- **Seed-level remote distribution** (`RemoteTransport.hpp`): versioned TCP
+  framing, round-robin coordinator distribution, remote `SeedQueue` bridging,
+  finish/abort control, and TCP connection helpers. Tested at the transport
+  level and with two independent simulated remote GPU hosts
+  (`test_remote_transport`, `test_remote_end_to_end`). See
+  `docs/DISTRIBUTED_ARCHITECTURE.md`.
 
 ## Explicitly NOT done / stubbed out — the real work still ahead
 
@@ -59,6 +70,12 @@ they'd naturally come up:
    defined. This is the single largest remaining piece of work: encoding
    the actual 5x7 board, 10 tile-insertion entries, tile
    kinds/orientations, ladybug/bug positions, and reachability logic.
+
+   The board model must also implement a configurable token-ejection rule.
+   Some levels make it illegal to shift the ladybug or an uneaten bug off the
+   board. Other levels keep the token attached to the ejected/spare tile so it
+   can be reinserted on a later move. For the latter, state must retain which
+   token(s) are on the spare tile; being off-board is not automatically fatal.
 
 2. **The CUDA kernel doesn't exist in this repo.** `launchCudaBatch()`
    is declared, never defined (except trivial fakes inside the test
@@ -91,33 +108,43 @@ they'd naturally come up:
    printing/using the reconstructed solution path once found (there's a
    comment marking where that logic goes, but no code).
 
-6. **`Master.hpp`/`Worker.hpp` share near-duplicate DFS logic**
-   (`Frame`, `tryExpand`, `runStack` are structurally identical except
-   for how each decides "keep expanding vs. hand off/stop"). This was a
-   deliberate, acknowledged simplification during the DFS rewrite —
-   worth factoring into a shared template/base at some point, but not
-   urgent (both are independently tested and correct as-is).
-
-7. **`PruningHeuristics.hpp`'s undo-detection (heuristic 2) is
+6. **`PruningHeuristics.hpp`'s undo-detection (heuristic 2) is
    deliberately conservative**: it only fires for orientation-indifferent
    tiles (Blank/Cross). Extending it to also detect undos for Straight/
    Corner/Stub tiles (which would require matching the exact prior
    orientation, not just tile kind) is a possible future improvement,
    not started. See `docs/PRUNING_HEURISTICS.md` for why.
 
-8. **`heuristicScore()` and `evaluateState()` (BeamSearch's board hooks)
+7. **`heuristicScore()` and `evaluateState()` (BeamSearch's board hooks)
    have never been tuned or tested against the real game** — only
    against the synthetic test board. Once the real board model exists
    (#1), these need real implementations and will likely need iteration
    to get beam search's success rate up on actual levels.
 
-9. **No handling yet for "no solution exists within the move budget."**
+8. **No handling yet for "no solution exists within the move budget."**
    Both the exhaustive brute force and beam search can, correctly,
    report failure — but there's no guidance yet in this codebase for
    what a caller should do with that (e.g. relax the move budget and
    retry, report to the player that the level is unsolvable as
    configured, etc.). Likely a product/UX decision more than a code one,
    just flagging it as unaddressed.
+
+9. **The current search code treats every `offBoard` result as dead.**
+    `Master.hpp`, `Worker.hpp`, and `BeamSearch.hpp` still contain this
+    placeholder assumption. It is valid for forbidden-ejection levels, but
+    wrong for levels where tokens travel with the spare tile. Once the real
+    board model exists, replace the boolean-only test with level-aware legality
+    and remaining-move checks. In particular, ejecting the ladybug or an
+    uneaten bug on the last allowed insertion cannot lead to a solution, while
+    doing so earlier may remain viable if reinsertion is allowed.
+
+10. **Remote solution reporting is not yet connected to `Worker`.** Seed
+    distribution and exhaustive completion work across hosts, and the wire
+    protocol reserves `SolutionFound`, but `SearchGlobals` currently exposes a
+    process-local `JobNode*`. Replace this with an exportable value-type full
+    move sequence before wiring early-solution notification and coordinator
+    abort broadcast. Fault recovery/reassignment also still needs stable seed
+    IDs and completion acknowledgements.
 
 ## Known environment quirks (not project bugs, just local friction)
 

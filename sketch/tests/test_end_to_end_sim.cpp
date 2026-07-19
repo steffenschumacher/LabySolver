@@ -1,13 +1,12 @@
 // End-to-end simulation: exercises the real Master/Worker/Dispatcher
-// pipeline (both now doing explicit-stack DFS) against a synthetic,
+// pipeline (strict-DFS master + bounded asynchronous workers) against a synthetic,
 // cheap-to-evaluate "board" so the full depth-7 search actually completes
 // in test time, while preserving the same shape (master depth 4 + worker
 // depth 3, chunked FLUSH_THRESHOLD submissions, node-pool recycling) as
 // the real puzzle. Verifies:
 //   1. a planted solution is found and the move path reconstructs correctly
-//   2. peak NodePool usage stays within a small O(depth x branching) bound
-//      per producer -- NOT O(branching^depth) -- proving DFS actually
-//      delivers the memory win it's meant to
+//   2. peak NodePool usage stays within the configured fixed arena and remains
+//      far below the full breadth-first tree
 //   3. reports wall-clock time and effective job throughput
 #include "../Master.hpp"
 #include "../Worker.hpp"
@@ -119,21 +118,17 @@ int main() {
     }
     size_t bfsBound = masterBfsPeak + NUM_WORKERS * workerBfsPeak;
 
-    // Small, generous slack on top of the DFS bound (a few in-flight CUDA
-    // batches' worth) -- nowhere near exponential headroom.
-    NodePool pool(dfsBound + 4 * MAX_BATCH);
+    // Fixed asynchronous-search arena for this small synthetic workload. It is
+    // larger than the strict-DFS reference but nowhere near a full tree.
+    const size_t poolCapacity = dfsBound + 4 * MAX_BATCH;
+    NodePool pool(poolCapacity);
     Dispatcher dispatcher(NUM_PRODUCERS);
     SeedQueue<32> seedQueue;
     SearchGlobals globals;
 
     JobState initialBoard{}; // all zero: boardBytes[7] == 0 moves taken so far
 
-    std::atomic<bool> stopDispatcher{false};
-    std::thread dispatcherThread([&] {
-        while (!stopDispatcher.load(std::memory_order_relaxed)) {
-            if (!dispatcher.runOnce()) std::this_thread::yield();
-        }
-    });
+    dispatcher.start();
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -152,8 +147,7 @@ int main() {
 
     masterThread.join();
     for (auto& t : workerThreads) t.join();
-    stopDispatcher.store(true, std::memory_order_relaxed);
-    dispatcherThread.join();
+    dispatcher.stop();
 
     auto t1 = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -195,11 +189,10 @@ int main() {
     }
 
     long peak = pool.peakInUse();
-    std::printf("NodePool peak in-use: %ld  (DFS bound ~%zu, old BFS-equivalent bound ~%zu, %.0fx "
-                "smaller)\n",
-                peak, dfsBound, bfsBound,
-                bfsBound / static_cast<double>(std::max<size_t>(dfsBound, 1)));
-    CHECK(peak <= static_cast<long>(dfsBound + 4 * MAX_BATCH));
+    std::printf("NodePool peak in-use: %ld / %zu capacity (strict-DFS reference ~%zu, "
+                "full-BFS reference ~%zu)\n",
+                peak, poolCapacity, dfsBound, bfsBound);
+    CHECK(peak <= static_cast<long>(poolCapacity));
 
     long jobs = g_jobsProcessed.load();
     std::printf("Elapsed: %.3fs, fake jobs processed: %ld (%.0f jobs/sec)\n", seconds, jobs,

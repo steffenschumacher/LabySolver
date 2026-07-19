@@ -2,7 +2,7 @@
 // applyMove, allBugsEaten and launchCudaBatch are declared but not
 // defined — plug in your real board logic and CUDA call). Shows how the
 // pieces in this directory connect: NodePool -> Dispatcher -> Master/
-// Workers -> SeedQueue, plus the dedicated dispatcher thread.
+// Workers -> SeedQueue, plus the three-stage dispatcher pipeline.
 
 #include "JobState.hpp"
 #include "NodePool.hpp"
@@ -28,12 +28,7 @@ int main() {
     SeedQueue<32> seedQueue;
     SearchGlobals globals;
 
-    std::atomic<bool> stopDispatcher{false};
-    std::thread dispatcherThread([&] {
-        while (!stopDispatcher.load(std::memory_order_relaxed)) {
-            if (!dispatcher.runOnce()) std::this_thread::yield();
-        }
-    });
+    dispatcher.start();
 
     std::thread masterThread([&] {
         Master master(dispatcher, pool, seedQueue, globals, initialBoard);
@@ -51,8 +46,7 @@ int main() {
 
     masterThread.join();
     for (auto& t : workerThreads) t.join();
-    stopDispatcher.store(true, std::memory_order_relaxed);
-    dispatcherThread.join();
+    dispatcher.stop();
 
     if (globals.solutionFound.load()) {
         // Walk globals.solutionLeaf->parent chain (+ the seed's stored

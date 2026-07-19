@@ -24,9 +24,9 @@ constexpr int MASTER_DEPTH = 4;
 class Master {
 public:
     Master(Dispatcher& dispatcher, NodePool& pool, SeedQueue<32>& seedQueue, SearchGlobals& globals,
-           const JobState& initialBoard)
+           const JobState& initialBoard, SearchInstrumentation* instrumentation = nullptr)
         : dispatcher(dispatcher), localPool(pool, FLUSH_THRESHOLD), seedQueue(seedQueue),
-          globals(globals), initialBoard(initialBoard) {}
+          globals(globals), initialBoard(initialBoard), instrumentation(instrumentation) {}
 
     void run() {
         JobNode* root = localPool.alloc();
@@ -38,6 +38,8 @@ public:
         tryExpand(root);
         runStack();
 
+        if (instrumentation && !globals.solutionFound.load(std::memory_order_relaxed))
+            instrumentation->markMasterFinished();
         seedQueue.finished(); // unblock any workers waiting on pop(), regardless of outcome
     }
 
@@ -87,7 +89,8 @@ private:
         for (int i = static_cast<int>(n->level) - 1; i >= 0 && cur; --i, cur = cur->parent) {
             seed.moves[i] = {cur->state.insertPoint, cur->state.orientation};
         }
-        seedQueue.push(seed);
+        bool emitted = seedQueue.push(seed);
+        if (instrumentation && emitted) instrumentation->recordSeedEmitted();
 
         Chain single = Chain::single(n);
         localPool.releaseChain(single);
@@ -125,13 +128,12 @@ private:
         // See Worker::tryExpand's comment: completion must be tracked by
         // total node count, not by submit()/collect() call counts, since
         // the dispatcher may merge multiple submitted chunks into one
-        // result chain within a single runOnce() round.
+        // result chain within a single prepared dispatcher batch.
         while (results.count < nodesSubmitted) {
             Chain chunk;
             dispatcher.collect(MASTER_ID, chunk);
             results.append(chunk);
         }
-
         Chain dead, survivors;
         bool wonHere = false;
         JobNode* n = results.head;
@@ -139,8 +141,7 @@ private:
             JobNode* next = n->next;
             n->next = nullptr;
             if (allBugsEaten(n->state)) {
-                globals.solutionLeaf = n;
-                globals.solutionFound.store(true, std::memory_order_relaxed);
+                globals.publishSolution(n);
                 wonHere = true;
                 // Wake any thread currently blocked in seedQueue.push()/pop()
                 // so it doesn't wait forever on an event that will never
@@ -152,6 +153,10 @@ private:
                 dead.pushBack(n);
             }
             n = next;
+        }
+        if (instrumentation) {
+            instrumentation->recordExpansion(parent->level, nodesSubmitted, true);
+            instrumentation->recordMasterSurvivors(parent->level + 1, survivors.count);
         }
         localPool.releaseChain(dead);
 
@@ -173,5 +178,6 @@ private:
     SeedQueue<32>& seedQueue;
     SearchGlobals& globals;
     JobState initialBoard;
+    SearchInstrumentation* instrumentation;
     std::vector<Frame> stack;
 };
