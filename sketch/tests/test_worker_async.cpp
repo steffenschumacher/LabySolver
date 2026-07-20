@@ -117,6 +117,40 @@ int main() {
                 stats.peakReadyNodes, stats.peakResidentNodes,
                 static_cast<unsigned long long>(stats.throttleTransitions));
 
+    // Runtime depth is level configuration, not a compile-time depth-seven
+    // assumption. A depth-four seed with maxDepth=6 expands exactly two levels.
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_submissionDepths.clear();
+        g_seenPaths.clear();
+    }
+    g_jobs.store(0);
+    g_duplicates.store(0);
+    NodePool shortPool(200);
+    Dispatcher shortDispatcher(2);
+    SeedQueue<32> shortSeeds;
+    SearchGlobals shortGlobals;
+    WorkerSchedulerConfig shortConfig = config;
+    shortConfig.maxDepth = 6;
+    shortConfig.seedDepth = 4;
+    shortConfig.maxResidentNodes = 60;
+    Seed shortSeed{};
+    shortSeed.depth = 4;
+    shortSeed.state.boardBytes[7] = 4;
+    shortSeeds.push(shortSeed);
+    shortSeeds.finished();
+    shortDispatcher.start();
+    {
+        Worker worker(1, shortDispatcher, shortPool, shortSeeds, shortGlobals, nullptr,
+                      shortConfig);
+        std::thread thread([&] { worker.run(); });
+        thread.join();
+        CHECK(worker.schedulerStats().jobsSubmitted == 20);
+    }
+    shortDispatcher.stop();
+    CHECK(g_jobs.load() == 20);
+    CHECK(shortPool.inUseCount() == 0);
+
     // Higher-branching memory stress: 20 + 20^2 + 20^3 = 8420 jobs are
     // exhaustively tested while a deliberately tight 220-node resident budget
     // forces repeated pause/complete/cascade cycles.

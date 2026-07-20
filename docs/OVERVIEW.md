@@ -2,19 +2,20 @@
 
 ## The game
 
-The board is 5x7 tiles. Each tile is one of:
+The board is 5x7 tiles. Runtime state stores a four-bit N/E/S/W opening mask;
+the source tile families are:
 
 - **Cross** — connects all 4 sides (1 orientation; rotating it does nothing).
 - **Straight** — connects 2 opposite sides (2 distinct orientations: horizontal/vertical).
 - **Corner** — connects 2 adjacent sides (4 distinct orientations).
 - **Stub** — connects to only 1 side, a dead end (4 distinct orientations).
 - **Blank** — connects to nothing (1 orientation).
+- **T-section** — connects 3 sides (4 orientations).
 
-A ladybug token sits on one tile. Four bug tokens sit on four other tiles.
-The player must walk the ladybug, via the paths currently connected
-between tiles, to each of the 4 bugs in turn (order may or may not be
-fixed depending on the level — check the specific level's rules), within
-a strict number of moves (e.g. 7 for the level driving this project).
+A ladybug sits on one tile and a level has one to four ordered goal insects.
+The ladybug must reach them in their declared order within the level's push
+allowance of two to seven. If several consecutive required insects are in the
+same connected component, all can be visited in order after one insertion.
 
 Only the **even** rows and columns are movable as whole strips. There is
 always exactly one "spare" tile not currently on the board. On your move,
@@ -47,28 +48,25 @@ single "move" in the turn-budget sense is really:
 3. (optional) move the ladybug again along the *new* connectivity,
    potentially eating any bug now reachable.
 
-## Tokens on the spare tile (level-configurable rule)
+## Tokens on the spare tile
 
-When a shift ejects a tile carrying the ladybug or an uneaten bug, there are
-two level-rule variants that the real board implementation must support:
+Tokens stay attached to their tiles. A goal tile may always be ejected and
+later reinserted. The level's `pushOut` flag controls player ejection:
 
-- **Attached-token mode**: the ejected token stays attached to the new spare
+- **Player ejection allowed**: the ejected token stays attached to the new spare
   tile. It is temporarily off the board and returns when that spare tile is
   inserted on a later move. An off-board ladybug cannot walk or eat bugs, and
   an off-board bug cannot be eaten, until its tile is reinserted.
-- **Forbidden-ejection mode**: shifting a tile carrying the ladybug or an
-  uneaten bug off the board is an illegal move, so that candidate is discarded.
+- **Player ejection forbidden**: shifting the ladybug's tile off the board is
+  illegal. This restriction does not apply to goal tiles.
 
-This behavior should be selected by the level configuration, not hard-coded in
-the search pipeline. In attached-token mode, `offBoard` is state information,
-not by itself proof that a branch is dead. The complete state must record which
-token(s), if any, are on the spare tile.
+This behavior is selected by the level configuration. The compact state records
+the spare as occupant position 35, so off-board status is not a generic dead
+flag.
 
-On the final allowed insertion, ejecting the ladybug or a still-required bug
-cannot contribute to a solution because there is no later move with which to
-reinsert it. Such a result may be pruned unless all bugs have already been
-eaten. More generally, pruning should be based on the remaining move budget and
-whether required tokens can return, rather than on a single `offBoard` boolean.
+On the final insertion, a branch with the ladybug or next required goal on the
+spare cannot complete. The exact CPU rules detect completion from canonical
+positions and ordered progress rather than a generic `offBoard` flag.
 
 ## Why this needs brute force at all
 

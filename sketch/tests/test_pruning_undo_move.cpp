@@ -30,6 +30,7 @@ int main() {
     CHECK(!isUndoInsertion(0, TileKind::Straight, false, 1));
     CHECK(!isUndoInsertion(0, TileKind::Corner, false, 1));
     CHECK(!isUndoInsertion(0, TileKind::Stub, false, 1));
+    CHECK(!isUndoInsertion(0, TileKind::TSection, false, 1));
 
     // Candidate entry is the SAME end again (not the opposite end) --
     // that's a different insertion (pushes further in the same
@@ -46,7 +47,7 @@ int main() {
     // flagged, and only when indifferent-orientation + not-crossed.
     for (EntryPoint prev = 0; prev < NUM_ENTRIES; ++prev) {
         for (TileKind k : {TileKind::Blank, TileKind::Cross, TileKind::Straight, TileKind::Corner,
-                           TileKind::Stub}) {
+                           TileKind::Stub, TileKind::TSection}) {
             for (bool crossed : {false, true}) {
                 int flaggedCount = 0;
                 for (EntryPoint cand = 0; cand < NUM_ENTRIES; ++cand) {

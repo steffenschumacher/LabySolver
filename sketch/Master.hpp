@@ -10,6 +10,11 @@ constexpr size_t MASTER_ID = 0; // producer id 0 reserved for master
 // i.e. own moves 5, 6 & 7 (3 levels) via their own DFS.
 constexpr int MASTER_DEPTH = 4;
 
+struct MasterSearchConfig {
+    uint8_t maxDepth = MAX_SUPPORTED_DEPTH;
+    uint8_t seedDepth = MASTER_DEPTH;
+};
+
 // ---------------------------------------------------------------------------
 // Master: the *same* explicit-stack DFS as Worker (see Worker.hpp's class
 // comment for why DFS instead of BFS -- it applies here just as much: with
@@ -24,9 +29,13 @@ constexpr int MASTER_DEPTH = 4;
 class Master {
 public:
     Master(Dispatcher& dispatcher, NodePool& pool, SeedQueue<32>& seedQueue, SearchGlobals& globals,
-           const JobState& initialBoard, SearchInstrumentation* instrumentation = nullptr)
+           const JobState& initialBoard, SearchInstrumentation* instrumentation = nullptr,
+           MasterSearchConfig config = {})
         : dispatcher(dispatcher), localPool(pool, FLUSH_THRESHOLD), seedQueue(seedQueue),
-          globals(globals), initialBoard(initialBoard), instrumentation(instrumentation) {}
+          globals(globals), initialBoard(initialBoard), instrumentation(instrumentation), config(config) {
+        if (config.maxDepth > MAX_SUPPORTED_DEPTH) throw std::invalid_argument("invalid max depth");
+        if (config.seedDepth > config.maxDepth) config.seedDepth = config.maxDepth;
+    }
 
     void run() {
         JobNode* root = localPool.alloc();
@@ -65,7 +74,12 @@ private:
             --top.remaining.count;
             next->next = nullptr;
 
-            if (static_cast<int>(next->level) >= MASTER_DEPTH) {
+            if (next->level >= config.maxDepth) {
+                Chain terminal = Chain::single(next);
+                localPool.releaseChain(terminal);
+                continue;
+            }
+            if (next->level >= config.seedDepth) {
                 // Reached the master/worker boundary alive (a win at this
                 // depth was already caught and handled inside the parent's
                 // tryExpand call, same as Worker) -- hand it to the
@@ -179,5 +193,6 @@ private:
     SearchGlobals& globals;
     JobState initialBoard;
     SearchInstrumentation* instrumentation;
+    MasterSearchConfig config;
     std::vector<Frame> stack;
 };

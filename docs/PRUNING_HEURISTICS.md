@@ -97,7 +97,7 @@ move must not be skipped.
 ### Interface
 
 ```cpp
-enum class TileKind { Blank, Cross, Straight, Corner, Stub };
+enum class TileKind { Blank, Cross, Straight, Corner, Stub, TSection };
 bool isOrientationIndifferent(TileKind);
 
 using EntryPoint = uint8_t;             // 0..9, 10 entries = 5 lines x 2 ends

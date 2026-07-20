@@ -70,6 +70,10 @@ needed for this specific broken local environment.
 
 | Test | What it verifies |
 |---|---|
+| `test_board_state` | Exhaustive tile-nibble and six-bit occupant round trips, progress/depth packing, rotations, and 23/28-byte size contracts. |
+| `test_game_rules` | Reciprocal connectivity, ordered multi-goal collection, shifts, spare occupants, ejection policy, rotations, minimum solving, and replay. |
+| `test_level_catalog` | All 40 canonical levels load and match expected push, goal-count, and ejection-rule distributions. |
+| `test_reference_levels` | Minimum-depth solutions for all 17 levels with two-, three-, or four-push allowances; every result independently replays. |
 | `test_chain` | `Chain`'s O(1) splice operations (`pushBack`, `append`, `takeAll`) preserve order and counts correctly. |
 | `test_nodepool` | `NodePool`/`ThreadLocalPool` alloc/release under stress; no leaks, peak in-use tracked correctly. |
 | `test_inbox` | `ChainInbox` SPSC ring buffer: FIFO order preserved across many transfers. |

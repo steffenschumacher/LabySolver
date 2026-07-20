@@ -2,15 +2,14 @@
 
 A brute-force + heuristic solver for a sliding-tile maze puzzle (the
 "Labymania"-style iPhone game): a 5x7 board of path tiles, a ladybug that
-must reach 4 bugs in turn, and a single spare tile that gets inserted along
+must reach one to four ordered insects, and a single spare tile inserted along
 movable rows/columns to reshape the maze between moves. The player (and
-this solver) has a strict move budget (e.g. 7 moves) to eat all 4 bugs.
+this solver) has a strict level-specific budget of two to seven pushes.
 
-This repository currently contains a **host/CPU architecture sketch** for
-the search side of the solver. The actual board rules and the CUDA
-reachability kernel are **not implemented here** — this is scaffolding
-meant to be filled in against the real game logic, plus a working,
-tested, memory-bounded search/dispatch pipeline around it.
+This repository contains a working canonical CPU board model and reference
+solver plus the tested, memory-bounded search/dispatch architecture. The real
+CUDA reachability kernel remains to be implemented; the dispatcher currently
+accepts mocked CUDA evaluators for concurrency and performance testing.
 
 ## Start here
 
@@ -37,12 +36,20 @@ tested, memory-bounded search/dispatch pipeline around it.
 - **[`docs/ASYNC_WORKER_SCHEDULER.md`](docs/ASYNC_WORKER_SCHEDULER.md)** —
   bounded asynchronous depth-priority scheduling, correctness invariants, and
   benchmark evidence.
+- **[`docs/LEVEL_FORMAT_AND_CATALOG.md`](docs/LEVEL_FORMAT_AND_CATALOG.md)** —
+  canonical rules and all 40 independently transcribed levels.
+- **[`docs/WINDOWS_CUDA_CLIENT_PLAN.md`](docs/WINDOWS_CUDA_CLIENT_PLAN.md)** —
+  staged Windows UI, remote-worker, transport, packaging, and CUDA plan.
 
 ## Repository layout
 
 ```
 sketch/                     All code lives here (single flat module for now).
-  JobState.hpp               Placeholder POD board/move/result struct (~80B).
+  BoardState.hpp             Stable 23-byte canonical board representation.
+  GameRules.hpp              Shifts, reachability, ordered goals, and moves.
+  LevelCatalog.hpp           Canonical connectivity-mask fixtures for 40 levels.
+  ReferenceSolver.hpp        Minimum-depth exhaustive CPU oracle and replay.
+  JobState.hpp               28-byte dispatcher record around compact state.
   Chain.hpp                  Intrusive singly-linked list over JobNode, O(1) splice ops.
   NodePool.hpp                Preallocated arena + free-list allocator for JobNode.
   Inbox.hpp                  Lock-free SPSC ring buffer of Chains (producer <-> dispatcher).
@@ -61,10 +68,10 @@ sketch/                     All code lives here (single flat module for now).
 docs/                        Documentation (this folder).
 ```
 
-## What you need to fill in
+## Remaining hardware integration
 
-Everything in `sketch/` is generic/board-agnostic except for a handful of
-named hook functions you must implement against the real game rules:
+The generic scheduler simulations still expose hook functions so mock and CUDA
+evaluators can be substituted:
 
 - `candidateMoves(const JobState&) -> std::vector<Move>` — legal
   (insertion point x orientation x ladybug pre-position) combinations.
@@ -76,13 +83,5 @@ named hook functions you must implement against the real game rules:
 - `heuristicScore(const JobState&) -> float` — only needed by `BeamSearch.hpp`.
 - `launchCudaBatch(JobState*, size_t)` — your real CUDA kernel entry
   point; `Dispatcher.hpp` calls this once per batch (up to 1000 jobs).
-- The real `JobState` layout (`JobState.hpp` is currently a placeholder
-  with a `boardBytes[64]` blob and a few result fields).
-
-The eventual level configuration must also select how token-bearing ejected
-tiles behave: either the move is illegal, or the token remains attached to the
-spare tile until it is reinserted. The current sketch's `offBoard` boolean and
-dead-state checks are placeholders and do not yet model the second variant;
-see `docs/OVERVIEW.md` and `docs/STATUS.md`.
 
 See `docs/STATUS.md` for exactly what's tested/verified vs. still open.

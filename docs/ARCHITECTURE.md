@@ -9,8 +9,9 @@ shaped this way, what each file does, and how they fit together. Read
 A naive exhaustive search, generating the whole move tree in memory
 before evaluating it, is a non-starter: with branching ~150/move and a
 7-move budget, even a **breadth-first** frontier a few levels deep
-consumes tens of GB (150^4 x ~80B ≈ 400GB for 4 levels; even 3 levels is
-~270MB *per concurrently-held lineage*). The whole point of this
+consumes tens of GB: `150^4` is about 506 million states, or roughly 12 GB
+even for bare 23-byte boards and substantially more for complete `JobNode`s.
+A depth-three frontier is already 3.375 million nodes. The whole point of this
 architecture is to keep peak host memory small and roughly constant,
 regardless of how deep or bushy the real search tree turns out to be,
 while still keeping the GPU's batch queue full so it isn't
@@ -34,23 +35,17 @@ The two techniques that make this work, used together:
 
 ## File-by-file
 
-### `JobState.hpp`
+### `BoardState.hpp` and `JobState.hpp`
 
-The ~80-byte POD payload for one board state: raw board bytes, the move
-that produced it (insertion point + orientation), and the CUDA kernel's
-per-state output (`reachableMask`, `bugsEatenMask`, `offBoard`). This is
-a **placeholder** — replace `boardBytes[64]` and the result fields with
-your real encoding, but keep it `is_trivially_copyable` (enforced by a
-`static_assert`): it lives in a preallocated arena and is never
-individually constructed/destructed.
+`CompactBoardState` is the stable 23-byte canonical CPU state: 18 tile bytes,
+five packed occupant bytes, and objective/depth metadata. `JobState` wraps it
+with five transient move/result bytes for a 28-byte dispatcher record. Both
+remain trivially copyable and live in the preallocated arena.
 
-The placeholder `offBoard` flag is not sufficient for the real rules. Some
-levels forbid ejecting any tile carrying the ladybug or an uneaten bug; other
-levels allow the token to remain attached to the spare tile and return on a
-later insertion. The real `JobState` therefore needs level-rule information
-(or access to immutable level configuration) and enough state to identify all
-tokens attached to the spare tile. See `docs/OVERVIEW.md` under "Tokens on the
-spare tile."
+Position 35 represents the spare tile, so player and goal ejection require no
+generic `offBoard` state. Immutable level configuration supplies the player-
+ejection rule and maximum depth; worker ownership and parentage remain in
+`JobNode` rather than contaminating board identity.
 
 ### `Chain.hpp`
 

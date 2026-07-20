@@ -30,14 +30,14 @@ possible next move (which is what the brute-force search does), you:
 1. **Generate all of them anyway** (there's usually only ~30-150 at this
    point, cheap).
 2. **Score each resulting board** with a heuristic — a quick, rough
-   guess at "how good is this position?" (e.g. "how many bugs have been
-   eaten, and how far is the ladybug from the nearest remaining bug?").
+   guess at "how good is this position?" (ordered goals completed first,
+   then graph accessibility of the next required goal).
    Lower score = better/more promising, by this codebase's convention.
 3. **Keep only the best N** (`N` = the "beam width", e.g. 64) and
    throw the rest away completely — they're gone, never revisited.
 4. Repeat from step 1, but only expanding moves from those N survivors,
    for as many levels as your move budget allows (e.g. 7).
-5. If at any point one of the surviving boards has all 4 bugs eaten,
+5. If at any point one of the surviving boards has completed every ordered goal,
    you're done — that's your solution.
 
 The name "beam" comes from imagining a flashlight beam sweeping forward

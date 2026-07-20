@@ -16,7 +16,8 @@
 #include <vector>
 
 constexpr size_t FLUSH_THRESHOLD = 200;
-constexpr int MAX_DEPTH = 7;
+constexpr int MAX_SUPPORTED_DEPTH = 7;
+constexpr int MAX_DEPTH = MAX_SUPPORTED_DEPTH; // compatibility for simulations/tests
 
 struct SearchGlobals {
     std::atomic<bool> solutionFound{false};
@@ -49,6 +50,8 @@ struct WorkerSchedulerConfig {
     // deepest branch to terminal depth even when the rest of the budget is
     // occupied by ready/in-flight nodes.
     size_t escapeBranching = 150;
+    uint8_t maxDepth = MAX_SUPPORTED_DEPTH;
+    uint8_t seedDepth = 4;
 };
 
 struct WorkerSchedulerStats {
@@ -99,7 +102,9 @@ private:
             throw std::invalid_argument("resumeJobsInFlight must be below maxJobsInFlight");
         if (config.escapeBranching == 0)
             throw std::invalid_argument("escapeBranching must be positive");
-        const size_t minimum = config.escapeBranching * (MAX_DEPTH - MASTER_SEED_DEPTH_HINT);
+        if (config.maxDepth > MAX_SUPPORTED_DEPTH || config.seedDepth > config.maxDepth)
+            throw std::invalid_argument("invalid runtime search depth");
+        const size_t minimum = config.escapeBranching * (config.maxDepth - config.seedDepth);
         if (config.maxResidentNodes <= minimum)
             throw std::invalid_argument("maxResidentNodes is too small for the escape reserve");
     }
@@ -185,7 +190,7 @@ private:
         if (jobsInFlight + candidates > config.maxJobsInFlight && jobsInFlight > 0) return false;
         const size_t childDepth = parent.level + 1;
         const size_t remainingExpansions =
-            childDepth < MAX_DEPTH ? static_cast<size_t>(MAX_DEPTH - childDepth) : 0;
+            childDepth < config.maxDepth ? static_cast<size_t>(config.maxDepth - childDepth) : 0;
         const size_t escapeReserve = remainingExpansions * config.escapeBranching;
         return residentNodes + candidates + escapeReserve <= config.maxResidentNodes;
     }
@@ -246,7 +251,7 @@ private:
             if (allBugsEaten(node->state)) {
                 globals.publishSolution(node);
                 seeds.abort();
-            } else if (node->state.offBoard == 0 && node->level < MAX_DEPTH) {
+            } else if (node->state.offBoard == 0 && node->level < config.maxDepth) {
                 pushReady(node);
             } else {
                 node->expansionComplete = true; // evaluated negative/terminal leaf
@@ -258,7 +263,7 @@ private:
 
     void completeSubtree(JobNode* node) {
         while (node) {
-            if (!node->expansionComplete && node->level < MAX_DEPTH)
+            if (!node->expansionComplete && node->level < config.maxDepth)
                 throw std::logic_error("attempted to prune an unexpanded live node");
             if (node->outstandingChildren != 0)
                 throw std::logic_error("attempted to prune a node with unfinished children");
@@ -285,13 +290,13 @@ private:
     }
 
     JobNode* peekDeepestReady() {
-        for (int depth = MAX_DEPTH - 1; depth >= 0; --depth)
+        for (int depth = config.maxDepth - 1; depth >= 0; --depth)
             if (!readyByDepth[depth].empty()) return readyByDepth[depth].front();
         return nullptr;
     }
 
     void popDeepestReady() {
-        for (int depth = MAX_DEPTH - 1; depth >= 0; --depth) {
+        for (int depth = config.maxDepth - 1; depth >= 0; --depth) {
             if (readyByDepth[depth].empty()) continue;
             readyByDepth[depth].pop_front();
             --readyNodes;
@@ -320,10 +325,6 @@ private:
         activeRoot = nullptr;
     }
 
-    // Seeds currently originate at depth four. Keeping this separate from
-    // MASTER_DEPTH avoids a Worker.hpp -> Master.hpp include cycle.
-    static constexpr int MASTER_SEED_DEPTH_HINT = 4;
-
     size_t id;
     Dispatcher& dispatcher;
     ThreadLocalPool localPool;
@@ -333,7 +334,7 @@ private:
     WorkerSchedulerConfig config;
     WorkerSchedulerStats stats;
 
-    std::array<std::deque<JobNode*>, MAX_DEPTH + 1> readyByDepth;
+    std::array<std::deque<JobNode*>, MAX_SUPPORTED_DEPTH + 1> readyByDepth;
     std::array<uint64_t, INSTRUMENTED_DEPTHS> activeSeedJobs{};
     size_t readyNodes = 0;
     size_t jobsInFlight = 0;

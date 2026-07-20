@@ -19,6 +19,13 @@ core
 .vscode/
 .idea/
 
+# Original LabyMania material supplied for local reference only.  The project
+# contains independently written rules/fixtures derived from it, never these
+# copyrighted source/assets or archive metadata.
+LabyMania/
+LabyMania.zip
+__MACOSX/
+
 # CUDA build artifacts (once a real .cu kernel is added)
 *.ptx
 *.cubin

@@ -117,7 +117,7 @@ std::vector<Cell> reducePrePositions(const std::vector<Cell>& reachable, Neighbo
 // real (if rarer) case you may want to add once your orientation
 // encoding is in hand -- kept out here to stay strictly conservative.
 // ===========================================================================
-enum class TileKind : uint8_t { Blank, Cross, Straight, Corner, Stub };
+enum class TileKind : uint8_t { Blank, Cross, Straight, Corner, Stub, TSection };
 
 inline bool isOrientationIndifferent(TileKind k) {
     return k == TileKind::Blank || k == TileKind::Cross;
