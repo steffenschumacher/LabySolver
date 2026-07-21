@@ -1,0 +1,33 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "linux-release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "LABY_BUILD_TESTS": "ON" }
+    },
+    {
+      "name": "windows-msvc",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-msvc",
+      "cacheVariables": { "LABY_BUILD_TESTS": "ON", "LABY_ENABLE_CUDA": "OFF" }
+    },
+    {
+      "name": "windows-msvc-cuda",
+      "inherits": "windows-msvc",
+      "binaryDir": "${sourceDir}/build/windows-msvc-cuda",
+      "cacheVariables": { "LABY_ENABLE_CUDA": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-release", "configurePreset": "linux-release" },
+    { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" },
+    { "name": "windows-msvc-cuda", "configurePreset": "windows-msvc-cuda", "configuration": "Release" }
+  ],
+  "testPresets": [
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+    { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}

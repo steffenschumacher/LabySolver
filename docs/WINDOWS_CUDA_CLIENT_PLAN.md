@@ -8,6 +8,28 @@ and replay solutions. The solver protocol and canonical 23-byte board state
 remain platform-neutral; only the UI, socket/event integration, and CUDA build
 packaging differ.
 
+## Implemented foundation
+
+The first cross-platform slice now exists:
+
+- protocol v2 serializes every seed field explicitly and carries a stable
+  64-bit seed ID; no C++ padding, `bool`, pointer, or enum ABI crosses hosts;
+- `RemoteTransport.hpp` abstracts Winsock startup, handles, send/receive,
+  close, connect, listen, and accept while retaining the POSIX implementation;
+- hosts can advertise worker threads, CUDA device count, and aggregate VRAM in
+  a portable `Hello` payload;
+- `RemoteWorkerHost.hpp` provides platform-neutral receiver, queue, worker,
+  dispatcher, metrics, and shutdown orchestration;
+- `CMakeLists.txt` and presets cover Linux, Windows MSVC, and Windows MSVC with
+  CUDA runtime discovery;
+- `laby_worker_probe` builds the Windows network/CUDA capability path and sends
+  the v2 handshake to a coordinator;
+- coordinator checkpointing uses the same stable seed IDs for power-loss
+  recovery and idempotent completion.
+
+The probe is not yet a complete CUDA worker executable: the real CUDA kernel
+and production board-hook adapter remain outstanding.
+
 ## Recommended stack
 
 - Windows 11 x64, with Windows 10 supported where the selected CUDA toolkit is
@@ -69,9 +91,10 @@ before heterogeneous deployment with a versioned wire format:
 magic | protocol version | message type | request id | payload length | payload
 ```
 
-Encode integers explicitly in network byte order. Serialize the canonical
-board's 23 defined bytes field-by-field, followed by depth and move-prefix
-records. Never serialize pointers, padding, `bool`, C++ enums, or raw structs.
+Protocol v2 encodes integers explicitly in network byte order and serializes the
+canonical board's 23 defined bytes followed by transient result fields, depth,
+and move-prefix records. It never serializes pointers, padding, `bool`, C++
+enums, or raw structs.
 
 At connection time exchange:
 

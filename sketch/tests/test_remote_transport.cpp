@@ -15,6 +15,7 @@ static std::array<int, 2> socketPair() {
 
 static Seed makeSeed(uint8_t id) {
     Seed seed{};
+    seed.id = 1000 + id;
     seed.state.boardBytes[0] = id;
     seed.state.insertPoint = static_cast<uint8_t>(id + 1);
     seed.depth = 4;
@@ -26,12 +27,36 @@ static Seed makeSeed(uint8_t id) {
 }
 
 int main() {
+    remote::HostCapabilities advertised{12, 2, uint64_t{12} * 1024 * 1024 * 1024};
+    auto hello = remote::decodeHello(remote::encodeHello(advertised));
+    CHECK(hello.workerThreads == advertised.workerThreads);
+    CHECK(hello.cudaDevices == advertised.cudaDevices);
+    CHECK(hello.cudaMemoryBytes == advertised.cudaMemoryBytes);
+
+    auto helloPair = socketPair();
+    remote::FramedSocket helloSender(helloPair[0]), helloReceiver(helloPair[1]);
+    remote::sendHello(helloSender, advertised);
+    auto receivedHello = remote::receiveHello(helloReceiver);
+    CHECK(receivedHello.workerThreads == 12);
+    CHECK(receivedHello.cudaDevices == 2);
+
     // Codec preserves the complete self-contained seed.
     Seed original = makeSeed(7);
     Seed decoded = remote::decodeSeed(remote::encodeSeed(original));
     CHECK(std::memcmp(&original.state, &decoded.state, sizeof(JobState)) == 0);
+    CHECK(decoded.id == original.id);
     CHECK(decoded.depth == original.depth);
     CHECK(std::memcmp(original.moves, decoded.moves, sizeof(original.moves)) == 0);
+    CHECK(remote::encodeSeed(original).size() == seedcodec::ENCODED_SEED_SIZE);
+    auto malformed = remote::encodeSeed(original);
+    malformed.pop_back();
+    bool rejected = false;
+    try {
+        (void)remote::decodeSeed(malformed);
+    } catch (const seedcodec::Error&) {
+        rejected = true;
+    }
+    CHECK(rejected);
 
     // Round-robin distribution to two independent remote queues, including
     // orderly Finished propagation.

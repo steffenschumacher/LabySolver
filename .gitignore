@@ -1,6 +1,7 @@
 # Build artifacts (all binaries are compiled from tests/*.cpp — see
 # docs/BUILD_AND_TEST.md; never commit them, always rebuild locally).
 sketch/bin/
+build/
 *.o
 *.obj
 *.a

@@ -9,6 +9,8 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <sys/socket.h>
 #include <thread>
@@ -49,6 +51,11 @@ static std::array<int, 2> socketPair() {
 int main() {
     constexpr size_t REMOTE_WORKERS = 2;
     constexpr size_t POOL_CAPACITY = 8000;
+    const auto checkpointDirectory = std::filesystem::temp_directory_path() /
+        ("labysolver-remote-checkpoint-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(checkpointDirectory);
+    durable::CoordinatorCheckpoint checkpoint(checkpointDirectory / "coordinator.chk");
 
     auto pairA = socketPair();
     auto pairB = socketPair();
@@ -62,7 +69,8 @@ int main() {
         {coordinatorA, 2}, {coordinatorB, 1}});
     remote::SeedReceiver receiverA(hostA), receiverB(hostB);
     remote::RemoteMetricsSink metricsA(hostA), metricsB(hostB);
-    remote::MetricsReceiver metricsReceiverA(coordinatorA), metricsReceiverB(coordinatorB);
+    remote::MetricsReceiver metricsReceiverA(coordinatorA, &checkpoint),
+        metricsReceiverB(coordinatorB, &checkpoint);
     SearchInstrumentation instrumentation;
     uint64_t sent = 0, receivedA = 0, receivedB = 0;
     uint64_t samplesA = 0, samplesB = 0;
@@ -94,7 +102,7 @@ int main() {
 
         JobState initial{};
         Master master(coordinatorDispatcher, coordinatorPool, coordinatorSeeds,
-                      coordinatorGlobals, initial, &instrumentation);
+                      coordinatorGlobals, initial, &instrumentation, {}, &checkpoint);
         master.run();
 
         distributorThread.join();
@@ -126,6 +134,12 @@ int main() {
     CHECK(estimate.masterFinished);
     CHECK(estimate.completedSeeds == 81);
     CHECK(static_cast<uint64_t>(estimate.estimatedTotalJobs) == 3279);
+    auto recovered = checkpoint.snapshot();
+    CHECK(recovered.generatedSeeds == 81);
+    CHECK(recovered.pending.empty());
+    CHECK(recovered.masterFinished);
+
+    std::filesystem::remove_all(checkpointDirectory);
 
     REPORT();
 }

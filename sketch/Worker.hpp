@@ -182,7 +182,7 @@ private:
             if (residentNodes != 0 || readyNodes != 0 || jobsInFlight != 0)
                 throw std::logic_error("worker completed seed with retained scheduler state");
             ++stats.completedSeeds;
-            if (instrumentation) instrumentation->recordCompletedSeed(activeSeedJobs);
+            if (instrumentation) instrumentation->recordCompletedSeed(seed.id, activeSeedJobs);
         }
     }
 

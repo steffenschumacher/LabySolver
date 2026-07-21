@@ -31,6 +31,10 @@ public:
     virtual void recordExpansion(size_t parentDepth, uint64_t children, bool masterProducer) = 0;
     virtual void recordCompletedSeed(
         const std::array<uint64_t, INSTRUMENTED_DEPTHS>& jobsByDepth) = 0;
+    virtual void recordCompletedSeed(
+        uint64_t, const std::array<uint64_t, INSTRUMENTED_DEPTHS>& jobsByDepth) {
+        recordCompletedSeed(jobsByDepth);
+    }
 };
 
 // Low-cost shared instrumentation. One locked update is made per expanded
@@ -39,6 +43,7 @@ public:
 // unknown work below the master/worker boundary.
 class SearchInstrumentation : public SearchInstrumentationSink {
 public:
+    using SearchInstrumentationSink::recordCompletedSeed;
     void recordExpansion(size_t parentDepth, uint64_t children, bool masterProducer) override {
         if (parentDepth + 1 >= INSTRUMENTED_DEPTHS) return;
         std::lock_guard<std::mutex> lock(mutex_);

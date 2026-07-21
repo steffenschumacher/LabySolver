@@ -1,0 +1,17 @@
+name: Windows MSVC
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-msvc
+      - name: Build
+        run: cmake --build --preset windows-msvc
+      - name: Test
+        run: ctest --preset windows-msvc

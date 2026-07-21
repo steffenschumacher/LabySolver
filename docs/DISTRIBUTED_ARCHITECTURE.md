@@ -56,11 +56,12 @@ sends one `SeedMetrics` message after finishing a seed; it does not report every
 job. `MetricsReceiver` merges these samples at the coordinator. See
 `docs/INSTRUMENTATION.md`.
 
-The protocol's maximum payload is 64 KiB. Version 1 sends `JobState` as raw
-bytes, so all hosts must run the same solver build and ABI. This is suitable
-for homogeneous Ubuntu/x86-64 GPU machines. A stable field-by-field board
-encoding should replace it if heterogeneous architectures or rolling upgrades
-are needed.
+The protocol's maximum payload is 64 KiB. Version 2 explicitly encodes the
+stable seed ID, canonical board bytes, transient result bytes, depth, and move
+prefix. It is independent of compiler padding and C++ ABI, allowing an
+MSVC/Windows worker to interoperate with a GCC/Clang Linux coordinator.
+Completion metrics carry the stable seed ID so a checkpointed coordinator can
+durably retire exactly that pending seed.
 
 ## Lifecycle
 

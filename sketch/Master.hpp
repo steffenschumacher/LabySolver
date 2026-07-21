@@ -30,9 +30,10 @@ class Master {
 public:
     Master(Dispatcher& dispatcher, NodePool& pool, SeedQueue<32>& seedQueue, SearchGlobals& globals,
            const JobState& initialBoard, SearchInstrumentation* instrumentation = nullptr,
-           MasterSearchConfig config = {})
+           MasterSearchConfig config = {}, MasterSeedPersistence* persistence = nullptr)
         : dispatcher(dispatcher), localPool(pool, FLUSH_THRESHOLD), seedQueue(seedQueue),
-          globals(globals), initialBoard(initialBoard), instrumentation(instrumentation), config(config) {
+          globals(globals), initialBoard(initialBoard), instrumentation(instrumentation), config(config),
+          persistence(persistence) {
         if (config.maxDepth > MAX_SUPPORTED_DEPTH) throw std::invalid_argument("invalid max depth");
         if (config.seedDepth > config.maxDepth) config.seedDepth = config.maxDepth;
     }
@@ -49,6 +50,8 @@ public:
 
         if (instrumentation && !globals.solutionFound.load(std::memory_order_relaxed))
             instrumentation->markMasterFinished();
+        if (persistence && !globals.solutionFound.load(std::memory_order_relaxed))
+            persistence->markMasterFinished();
         seedQueue.finished(); // unblock any workers waiting on pop(), regardless of outcome
     }
 
@@ -96,14 +99,17 @@ private:
     // releases `n` itself immediately -- its ancestors are untouched and
     // get released normally, later, when their own frame is exhausted.
     void emitSeed(JobNode* n) {
-        Seed seed;
+        Seed seed{};
         seed.state = n->state;
         seed.depth = static_cast<uint8_t>(n->level);
         JobNode* cur = n;
         for (int i = static_cast<int>(n->level) - 1; i >= 0 && cur; --i, cur = cur->parent) {
             seed.moves[i] = {cur->state.insertPoint, cur->state.orientation};
         }
-        bool emitted = seedQueue.push(seed);
+        const uint64_t ordinal = ++generatedSeedOrdinal;
+        seed.id = ordinal;
+        bool shouldEnqueue = !persistence || persistence->registerGeneratedSeed(ordinal, seed);
+        bool emitted = shouldEnqueue && seedQueue.push(seed);
         if (instrumentation && emitted) instrumentation->recordSeedEmitted();
 
         Chain single = Chain::single(n);
@@ -194,5 +200,7 @@ private:
     JobState initialBoard;
     SearchInstrumentation* instrumentation;
     MasterSearchConfig config;
+    MasterSeedPersistence* persistence;
+    uint64_t generatedSeedOrdinal = 0;
     std::vector<Frame> stack;
 };

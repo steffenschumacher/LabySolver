@@ -14,6 +14,7 @@
 // master/worker split later doesn't require touching this struct.
 constexpr size_t SEED_MAX_MOVES = 8; // must be >= the real move budget (7)
 struct Seed {
+    uint64_t id; // stable coordinator-assigned ordinal; zero means legacy/local-only
     JobState state;
     struct Move {
         uint8_t insertPoint;
@@ -21,6 +22,17 @@ struct Seed {
     };
     uint8_t depth; // how many of the entries below are valid
     Move moves[SEED_MAX_MOVES];
+};
+
+// Optional durable frontier used by Master. A generated ordinal is stable
+// because Master traversal is deterministic. Returning false means that seed
+// was already checkpointed before a restart and must not be enqueued again;
+// the recovery supervisor separately requeues the persisted pending copy.
+class MasterSeedPersistence {
+public:
+    virtual ~MasterSeedPersistence() = default;
+    virtual bool registerGeneratedSeed(uint64_t ordinal, Seed& seed) = 0;
+    virtual void markMasterFinished() = 0;
 };
 
 // ---------------------------------------------------------------------------

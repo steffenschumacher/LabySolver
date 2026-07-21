@@ -23,9 +23,14 @@
 - Three-stage dispatcher with a bounded three-slot prepared queue, fair
   producer batching, immediate full-batch dispatch, and a 2 ms partial-batch
   ceiling.
-- Seed-level remote TCP distribution, per-seed instrumentation, running search
-  estimates, beam-search scaffolding, pruning helpers, and mocked-CUDA
-  feasibility simulation.
+- Protocol-v2 seed distribution with stable IDs, ABI-independent encoding,
+  Winsock/POSIX portability, capability handshake, per-seed metrics, and
+  reusable remote worker-host orchestration.
+- Atomic coordinator checkpoints containing search identity, deterministic
+  master progress, terminal flags, and the pending seed frontier. Recovery and
+  actual remote-completion paths are tested.
+- CMake/MSVC/CUDA presets and a Windows worker capability probe. Beam-search
+  scaffolding, pruning helpers, and mocked-CUDA simulation remain available.
 
 The complete suite is run with `make test` from `sketch/`.
 
@@ -54,9 +59,9 @@ The complete suite is run with `make test` from `sketch/`.
 2. Implement the real CUDA structure-of-arrays batch format and reachability
    kernel, then compare it byte-for-byte with the CPU oracle over generated and
    catalog-derived states.
-3. Replace raw-build seed payloads with the explicit portable wire encoding
-   described in `WINDOWS_CUDA_CLIENT_PLAN.md`, add stable seed/request IDs, and
-   return value-type solution paths from remote workers.
+3. Return and persist value-type solution paths from remote workers, then add
+   authenticated transport, leases/heartbeats, disconnect reassignment, and
+   coordinator process locking.
 4. Wire real-board scoring into beam search. Progress toward the next ordered
    goal should dominate, followed by graph accessibility and remaining budget.
 5. Evaluate the conservative pruning helpers against canonical child-state
@@ -67,13 +72,13 @@ The complete suite is run with `make test` from `sketch/`.
 7. Exhaustively solve deeper catalog levels where practical and use the rest
    for beam/CUDA performance studies. A beam result proves validity after
    replay, not optimality.
-8. Restructure into CMake libraries and implement the Windows CUDA client in
-   the staged order documented separately.
+8. Finish the Windows CUDA executable by adapting the real kernel/board hooks,
+   then add UI and packaging in the staged order documented separately.
 
 ## Current confidence boundary
 
 The compact representation and CPU rules are strongly covered by focused unit
 tests and 17 real shallow-level minimum solutions. They are a trustworthy
 oracle under the documented gameplay assumptions. The project does not yet
-claim GPU equivalence, cross-ABI wire portability, optimal solutions for the
-deeper levels, or production-ready remote-host security.
+claim GPU equivalence, optimal solutions for deeper levels, production-ready
+remote-host security, or durable solution-path persistence.

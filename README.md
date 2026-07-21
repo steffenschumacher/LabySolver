@@ -40,6 +40,8 @@ accepts mocked CUDA evaluators for concurrency and performance testing.
   canonical rules and all 40 independently transcribed levels.
 - **[`docs/WINDOWS_CUDA_CLIENT_PLAN.md`](docs/WINDOWS_CUDA_CLIENT_PLAN.md)** —
   staged Windows UI, remote-worker, transport, packaging, and CUDA plan.
+- **[`docs/COORDINATOR_RECOVERY.md`](docs/COORDINATOR_RECOVERY.md)** — durable
+  seed frontier, atomic checkpoint ordering, and power-loss restart procedure.
 
 ## Repository layout
 
@@ -60,6 +62,9 @@ sketch/                     All code lives here (single flat module for now).
   BeamSearch.hpp              Optional CPU-only heuristic-first pre-pass (see docs/BEAM_SEARCH.md).
   PruningHeuristics.hpp       Two board-agnostic search-space reduction heuristics.
   RemoteTransport.hpp         TCP framing and coordinator/remote seed bridges.
+  RemoteWorkerHost.hpp        Cross-platform remote worker-host orchestration.
+  CoordinatorCheckpoint.hpp  Atomic durable coordinator frontier and recovery.
+  SeedCodec.hpp               ABI-independent protocol-v2 seed encoding.
   SearchInstrumentation.hpp   Running observed/estimated search-size metrics.
   main_sketch.cpp             Wiring example (not compilable standalone -- board hooks are stubs).
   Makefile                   Builds and runs all tests.
