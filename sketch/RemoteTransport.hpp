@@ -254,7 +254,7 @@ inline SocketHandle connectTcp(const std::string& host, const std::string& port)
     for (addrinfo* address = addresses; address; address = address->ai_next) {
         SocketHandle fd = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
         if (fd == INVALID_SOCKET_HANDLE) continue;
-        if (::connect(fd, address->ai_addr, address->ai_addrlen) == 0) {
+        if (::connect(fd, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0) {
             connected = fd;
             break;
         }
@@ -280,7 +280,8 @@ inline SocketHandle listenTcp(const std::string& port, int backlog = 16) {
         if (fd == INVALID_SOCKET_HANDLE) continue;
         int reuse = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-        if (::bind(fd, address->ai_addr, address->ai_addrlen) == 0 && ::listen(fd, backlog) == 0) {
+        if (::bind(fd, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0 &&
+            ::listen(fd, backlog) == 0) {
             listener = fd;
             break;
         }

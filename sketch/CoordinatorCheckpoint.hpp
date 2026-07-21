@@ -57,8 +57,8 @@ inline uint32_t readU32(const std::vector<uint8_t>& bytes, size_t& offset) {
 
 inline void syncFile(const std::filesystem::path& path) {
 #ifdef _WIN32
-    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE || !::FlushFileBuffers(file)) {
         if (file != INVALID_HANDLE_VALUE) ::CloseHandle(file);
         throw CheckpointError("cannot flush checkpoint file");
